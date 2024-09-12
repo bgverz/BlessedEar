@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BlessedEar Playlist Curator</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <h1>BlessedEar Playlist Curator</h1>
+    <form id="playlist-form">
+        <label for="search-input">Search for a song:</label>
+        <div id="search-container">
+            <input type="text" id="search-input" placeholder="Start typing to search songs..." autocomplete="off">
+            <div id="autocomplete"></div> <!-- Make sure this is immediately below the search input -->
+        </div>
+        
+        <h3>Selected Songs</h3>
+        <ul id="selected-songs"></ul>
+    
+        <label for="playlist-size">Playlist Size:</label>
+        <input type="number" id="playlist-size" min="1" max="50" value="10">
+        <button type="submit" class="button blue">Generate Playlist</button>
+    </form>
+    
+    <div id="playlist"></div>
+    <script src="app.js"></script>
+
+</body>
+</html>
