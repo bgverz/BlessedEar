@@ -1,30 +1,31 @@
 body {
-    font-family: 'Helvetica Neue', Arial, sans-serif;
+    font-family: 'Montserrat', Arial, sans-serif;
     max-width: 700px;
     margin: 0 auto;
     padding: 20px;
-    background-color: #f7f7f7;
+    background-color: #121212;
+    color: white;
 }
 
 h1 {
     text-align: center;
-    color: #333;
+    color: white;
     font-size: 2em;
     margin-bottom: 20px;
 }
 
 form {
-    background-color: #ffffff;
+    background-color: #181818;
     padding: 20px;
     border-radius: 8px;
-    box-shadow: 0 0 15px rgba(0, 0, 0, 0.1);
+    box-shadow: 0 0 15px rgba(0, 0, 0, 0.5); 
     margin-bottom: 30px;
 }
 
 label {
     display: block;
     margin: 15px 0 5px;
-    color: #333;
+    color: #b3b3b3; 
     font-weight: bold;
     font-size: 1.1em;
 }
@@ -33,10 +34,12 @@ input, textarea {
     width: 100%;
     padding: 10px;
     margin-bottom: 15px;
-    border: 1px solid #ddd;
+    border: 1px solid #333; 
     border-radius: 4px;
     font-size: 1em;
     box-sizing: border-box;
+    background-color: #333;
+    color: white;
 }
 
 button {
@@ -47,123 +50,92 @@ button {
     cursor: pointer;
     font-size: 1em;
     transition: background-color 0.3s ease;
+    box-shadow: 0px 4px 10px rgba(0, 0, 0, 0.3);
+}
+
+#playlist-form button[type="submit"] {
+    background-color: #1DB954; 
+}
+
+#playlist-form button[type="submit"]:hover {
+    background-color: #179E48; 
 }
 
 #autocomplete button {
-    background-color: #28a745; 
+    background-color: #1DB9FF;
 }
 
 #autocomplete button:hover {
-    background-color: #218838;
+    background-color: #1A8ED6;
 }
 
 #selected-songs button {
-    background-color: #dc3545; 
+    background-color: #dc3545;
 }
 
 #selected-songs button:hover {
     background-color: #c82333;
 }
 
-#playlist-form button[type="submit"] {
-    background-color: #28a745; 
+#search-container {
+    position: relative;
 }
 
-#playlist-form button[type="submit"]:hover {
-    background-color: #218838; 
-}
-
-/* Add this to styles.css to fix the dropdown behavior */
-#playlist-form {
-    position: relative; /* Ensure the form is the parent for positioning */
-}
-
-/* Remove the red border and align the dropdown correctly */
 #autocomplete {
-    display: none; /* Hidden by default */
-    position: absolute; /* Dropdown is positioned relative to the form */
-    width: 100%; /* Match the width of the search bar */
-    z-index: 1000; /* Ensure it's above other elements */
-    background-color: white; /* White background */
-    border: 1px solid #ddd; /* Standard border */
-    border-radius: 4px; /* Rounded corners */
-    box-sizing: border-box; /* Include padding/border in width calculation */
-    top: 100%; /* Position it directly under the search bar */
-    left: 0; /* Align it perfectly with the left side of the search bar */
-    margin-top: 5px; /* Small gap between the search bar and dropdown */
-    overflow: hidden; /* Hide overflow */
-    padding: 0; /* Remove padding */
+    display: none; 
+    position: absolute;
+    width: 100%;
+    z-index: 1000;
+    background-color: #181818;
+    border: 1px solid #333;
+    border-radius: 4px;
+    top: calc(100% + 5px);
+    left: 0;
+    overflow-y: auto;
+    max-height: 200px;
+    color: white;
 }
 
-/* List styling for the dropdown */
 #autocomplete ul {
-    list-style-type: none; /* No bullets */
+    list-style-type: none;
     padding: 0;
     margin: 0;
-    max-height: 200px; /* Limit the height for scrollable content */
-    overflow-y: auto; /* Enable vertical scroll if items exceed height */
 }
 
-/* Styling for individual items in the dropdown */
 #autocomplete li {
     padding: 10px;
-    display: flex; /* Flexbox for alignment */
-    align-items: center; /* Vertically center elements */
-    justify-content: space-between; /* Space between song details and button */
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid #333;
     cursor: pointer;
-    border-bottom: 1px solid #ddd; /* Divider between items */
-    white-space: nowrap; /* Prevent text from wrapping */
-    overflow: hidden; /* Hide overflow */
-    text-overflow: ellipsis; /* Add ellipsis (...) for long text */
+    color: white;
 }
 
-/* Image (album cover) styling */
+#autocomplete li:hover {
+    background-color: #333;
+}
+
 #autocomplete img {
     margin-right: 10px;
-    width: 40px; /* Fixed size for album image */
+    width: 40px;
     height: 40px;
-    border-radius: 4px; /* Rounded corners for images */
-}
-
-/* Button (Add) styling */
-#autocomplete button {
-    margin-left: 10px; /* Space between text and button */
-    background-color: #007bff; /* Blue color */
-    color: white; /* White text */
-    border: none; /* Remove default border */
-    padding: 5px 10px; /* Padding inside the button */
-    border-radius: 5px; /* Rounded button */
-    cursor: pointer; /* Pointer cursor on hover */
-}
-
-/* Ensure the autocomplete dropdown is positioned relative to the search container */
-#search-container {
-    position: relative; /* Make the search container the positioning reference */
-}
-
-/* Align the dropdown directly below the search bar */
-#autocomplete {
-    display: none;
-    position: absolute; /* Positioned relative to the #search-container */
-    width: 100%; /* Match the width of the search bar */
-    z-index: 1000;
-    background-color: white;
-    border: 1px solid #ddd;
     border-radius: 4px;
-    box-sizing: border-box;
-    top: 100%; /* Position it directly below the search bar */
-    left: 0; /* Align it with the search bar */
-    margin-top: 5px; /* Small gap between search bar and dropdown */
-    overflow: hidden;
 }
 
-
-/* Styling for the search input field */
-input#search-input {
-    width: 100%; /* Ensure the search bar takes up the full width of the container */
-    box-sizing: border-box; /* Account for padding and borders */
+#autocomplete button {
+    margin-left: 10px;
+    background-color: #1DB954;
+    color: white;
+    border: none;
+    padding: 5px 10px;
+    border-radius: 5px;
+    cursor: pointer;
 }
 
+#autocomplete button:hover {
+    background-color: #179E48;
+}
 
 #selected-songs {
     list-style-type: none;
@@ -173,8 +145,8 @@ input#search-input {
 
 #selected-songs li {
     padding: 10px;
-    background-color: #fff;
-    border: 1px solid #ddd;
+    background-color: #181818;
+    border: 1px solid #333;
     margin-bottom: 5px;
     border-radius: 4px;
     display: flex;
@@ -182,12 +154,28 @@ input#search-input {
     align-items: center;
 }
 
+button.blue {
+    background-color: #1DB954;
+    padding: 10px 20px;
+    color: white;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 1em;
+    transition: background-color 0.3s ease;
+    box-shadow: 0px 4px 10px rgba(0, 0, 0, 0.3);
+}
+
+button.blue:hover {
+    background-color: #179E48;
+}
+
 #playlist {
     margin-top: 30px;
     padding: 20px;
-    background-color: #ffffff;
+    background-color: #181818;
     border-radius: 8px;
-    box-shadow: 0 0 15px rgba(0, 0, 0, 0.1);
+    box-shadow: 0 0 15px rgba(0, 0, 0, 0.3);
 }
 
 #playlist ul {
@@ -198,12 +186,13 @@ input#search-input {
 
 #playlist li {
     padding: 10px;
-    background-color: #f9f9f9;
-    border: 1px solid #ddd;
+    background-color: #181818;
+    border: 1px solid #333;
     margin-bottom: 5px;
     border-radius: 4px;
     display: flex;
-    align-items: center; 
+    justify-content: space-between;
+    align-items: center;
 }
 
 #playlist img {
@@ -211,4 +200,23 @@ input#search-input {
     width: 50px;
     height: 50px;
     border-radius: 4px;
+}
+
+#generated-playlist {
+    margin-top: 20px;
+}
+
+a {
+    color: #1DB954;
+    text-decoration: none;
+    font-weight: bold;
+    background-color: #181818;
+    padding: 10px 20px;
+    border-radius: 5px;
+    display: inline-block;
+    transition: background-color 0.3s ease;
+}
+
+a:hover {
+    background-color: #1A8E45;
 }
