@@ -45,24 +45,20 @@ def generate_playlist():
     data = request.json
     song_ids = []
 
-    # Search for each song to get the track IDs
     for song in data.get('songs', []):
         search_result = sp.search(q=f'{song}', type='track')
         if search_result['tracks']['items']:
             song_ids.append(search_result['tracks']['items'][0]['id'])
 
-    # If song_ids is empty, return an error
     if not song_ids:
         return jsonify({"error": "No valid seed tracks found"}), 400
 
-    # Get recommendations based on the selected songs
     try:
         recommendations = sp.recommendations(seed_tracks=song_ids, limit=int(data.get('playlistSize', 10)))
     except spotipy.exceptions.SpotifyException as e:
         print(f"Error fetching recommendations: {e}")
         return jsonify({"error": "Failed to generate recommendations"}), 500
 
-    # Build the playlist
     playlist = []
     for track in recommendations['tracks']:
         track_info = {
@@ -78,16 +74,15 @@ def generate_playlist():
 @app.route('/create_spotify_playlist', methods=['POST'])
 def create_spotify_playlist():
     data = request.json
-    print('Data received for playlist:', data)  # Debugging
+    print('Data received for playlist:', data)
 
     playlist_name = data.get('name', 'My BlessedEar Playlist')
     song_ids = data.get('song_ids', [])
-    print('Song IDs:', song_ids)  # Debugging
+    print('Song IDs:', song_ids) 
 
-    # Create the playlist and add tracks
     try:
         playlist = sp.user_playlist_create(sp.current_user()['id'], playlist_name)
-        print('Created playlist:', playlist)  # Debugging
+        print('Created playlist:', playlist)
 
         sp.user_playlist_add_tracks(sp.current_user()['id'], playlist['id'], song_ids)
         return jsonify({"message": "Playlist created successfully", "playlist_url": playlist['external_urls']['spotify']})
