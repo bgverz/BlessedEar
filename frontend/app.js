@@ -1,5 +1,5 @@
 let selectedSongs = [];
-let playlist = [];  // Global variable to store the generated playlist
+let playlist = [];
 
 document.getElementById('search-input').addEventListener('input', async function (e) {
     const query = e.target.value;
@@ -34,7 +34,6 @@ document.getElementById('search-input').addEventListener('input', async function
     }
 });
 
-// Handle dropdown showing/hiding on focus/blur
 document.getElementById('search-input').addEventListener('focus', function () {
     document.getElementById('autocomplete').style.display = 'block';
 });
@@ -88,7 +87,7 @@ document.getElementById('playlist-form').addEventListener('submit', async functi
     e.preventDefault();
 
     const playlistSize = document.getElementById('playlist-size').value;
-    const playlistContainer = document.getElementById('generated-playlist');  // Ensure this element is referenced correctly
+    const playlistContainer = document.getElementById('generated-playlist');
 
     try {
         const response = await fetch('http://127.0.0.1:5000/generate_playlist', {
@@ -103,7 +102,7 @@ document.getElementById('playlist-form').addEventListener('submit', async functi
         });
 
         const data = await response.json();
-        playlist = data.playlist;  // Store generated playlist globally
+        playlist = data.playlist;
 
         let playlistHtml = '<h2>Your Playlist</h2><ul>';
         playlist.forEach(song => {
@@ -114,7 +113,7 @@ document.getElementById('playlist-form').addEventListener('submit', async functi
             </li>`;
         });
         playlistHtml += '</ul>';
-        playlistContainer.innerHTML = playlistHtml;  // Ensure the correct container is used
+        playlistContainer.innerHTML = playlistHtml;
 
     } catch (error) {
         console.error('Error generating playlist:', error);
@@ -128,7 +127,7 @@ async function createSpotifyPlaylist() {
     }
 
     const trackIds = playlist.map(song => song.id);
-    console.log('Track IDs for Spotify Playlist:', trackIds);  // Debugging the track IDs
+    console.log('Track IDs for Spotify Playlist:', trackIds);
 
     try {
         const createResponse = await fetch('http://127.0.0.1:5000/create_spotify_playlist', {
@@ -142,7 +141,7 @@ async function createSpotifyPlaylist() {
         });
 
         const createData = await createResponse.json();
-        console.log('Spotify Playlist Response:', createData);  // Debugging the backend response
+        console.log('Spotify Playlist Response:', createData);
 
         if (createData.playlist_url) {
             const spotifyLink = document.createElement('a');
