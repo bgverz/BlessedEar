@@ -1,0 +1,59 @@
+# ---- Python ----
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.sqlite3
+*.db
+*.log
+
+# Virtual environment
+venv/
+.env
+*.env
+
+# ---- Node / Next.js ----
+node_modules/
+.next/
+out/
+dist/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Dependency directories
+jspm_packages/
+
+# Typescript
+*.tsbuildinfo
+
+# ---- Frontend ----
+# Production build
+build/
+
+# Coverage
+coverage/
+
+# ---- Docker ----
+# Ignore local Docker data
+docker-compose.override.yml
+*.pid
+
+# ---- OS/Editor ----
+.DS_Store
+*.swp
+*.swo
+*.tmp
+.cache/
+.idea/
+.vscode/
+
+# ---- Project-specific ----
+# Database file
+blessedear.db
+
+# Local configs
+*.local
