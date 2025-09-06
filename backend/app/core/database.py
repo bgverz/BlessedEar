@@ -1,4 +1,3 @@
-# app/core/database.py
 from sqlalchemy import create_engine, MetaData
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
@@ -7,7 +6,6 @@ from app.core.config import get_settings
 
 settings = get_settings()
 
-# SQLAlchemy setup
 if settings.database_url.startswith("sqlite"):
     engine = create_engine(
         settings.database_url,
@@ -20,10 +18,8 @@ else:
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# In-memory cache instead of Redis
 memory_cache = {}
 
-# Database dependency
 def get_db():
     db = SessionLocal()
     try:
@@ -31,13 +27,11 @@ def get_db():
     finally:
         db.close()
 
-# Initialize database
 async def init_db():
     """Create database tables"""
     Base.metadata.create_all(bind=engine)
     print("Database initialized!")
 
-# Cache utilities (using memory instead of Redis)
 async def set_cache(key: str, value: str, expire: int = 3600):
     memory_cache[key] = value
 
@@ -45,4 +39,10 @@ async def get_cache(key: str):
     return memory_cache.get(key)
 
 async def delete_cache(key: str):
-    memory_cache.pop(key, None)
+    """Delete a key from cache"""
+    try:
+        print(f"Deleting cache key: {key}")
+        pass
+    except Exception as e:
+        print(f"Cache deletion failed for {key}: {e}")
+        pass

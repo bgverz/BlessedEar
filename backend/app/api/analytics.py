@@ -41,7 +41,6 @@ async def get_listening_profile(current_user: dict = Depends(get_current_user)):
             "total_tracks_analyzed": len(features_df)
         }
         
-        # Generate insights
         insights = generate_listening_insights(feature_stats)
         
         return {

@@ -367,17 +367,27 @@ export default function DashboardLayout() {
   const [token, setToken] = useState<string | null>(null);
 
   useEffect(() => {
-    // Get token from URL - no redirects for debugging
     const params = new URLSearchParams(window.location.search);
     const urlToken = params.get('token');
+    const isFresh = params.get('fresh');
     
     console.log('Token check:', urlToken ? 'Found' : 'Not found');
+    console.log('Fresh login:', isFresh ? 'Yes' : 'No');
     
     if (urlToken) {
       setToken(urlToken);
+      
+      if (isFresh) {
+        console.log('Fresh login detected - clearing all cached data');
+        setUserProfile(null);
+        setCurrentUser(null);
+        setRecommendations([]);
+        localStorage.clear();
+        sessionStorage.clear();
+      }
+      
       window.history.replaceState({}, '', '/dashboard');
     }
-    // Removed the redirect to login - stay on dashboard regardless
   }, []);
 
   useEffect(() => {
@@ -440,17 +450,14 @@ export default function DashboardLayout() {
 
   const handleLogout = async () => {
     try {
-      // Clear local token
       setToken(null);
       setUserProfile(null);
       setCurrentUser(null);
       setRecommendations([]);
       
-      // Clear browser storage
       localStorage.clear();
       sessionStorage.clear();
       
-      // Call backend logout (optional)
       if (token) {
         await fetch(`${API_BASE}/api/auth/logout`, {
           method: 'POST',
@@ -458,11 +465,9 @@ export default function DashboardLayout() {
         });
       }
       
-      // Redirect to login with force fresh auth
       window.location.href = '/login?force=true';
     } catch (error) {
       console.error('Error logging out:', error);
-      // Force redirect anyway
       window.location.href = '/login?force=true';
     }
   };

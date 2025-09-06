@@ -49,6 +49,55 @@ class RecommendationEngine:
             print(f"Error getting top tracks: {e}")
             return []
     
+    async def get_user_all_tracks(self, sp: spotipy.Spotify, limit: int = 200):
+        """Get tracks from user's library, playlists, and top tracks"""
+        all_tracks = []
+        
+        try:
+            for time_range in ['short_term', 'medium_term', 'long_term']:
+                top_tracks = await self.get_user_top_tracks(sp, time_range, 20)
+                all_tracks.extend(top_tracks)
+            
+            try:
+                saved_tracks = sp.current_user_saved_tracks(limit=50)
+                for item in saved_tracks['items']:
+                    all_tracks.append(item['track'])
+                print(f"Added {len(saved_tracks['items'])} saved tracks")
+            except Exception as e:
+                print(f"Error getting saved tracks: {e}")
+            
+            try:
+                playlists = sp.current_user_playlists(limit=20)
+                for playlist in playlists['items']:
+                    if playlist['owner']['id'] == sp.me()['id']:
+                        try:
+                            tracks = sp.playlist_tracks(playlist['id'], limit=30)
+                            for item in tracks['items']:
+                                if item['track'] and item['track']['id']:
+                                    all_tracks.append(item['track'])
+                        except Exception as e:
+                            print(f"Error getting tracks from playlist {playlist['name']}: {e}")
+                print(f"Added tracks from {len(playlists['items'])} playlists")
+            except Exception as e:
+                print(f"Error getting playlists: {e}")
+            
+            unique_tracks = []
+            seen_ids = set()
+            
+            for track in all_tracks:
+                if track and track.get('id') and track['id'] not in seen_ids:
+                    seen_ids.add(track['id'])
+                    unique_tracks.append(track)
+            
+            print(f"Total unique tracks collected: {len(unique_tracks)}")
+            
+            random.shuffle(unique_tracks)
+            return unique_tracks[:limit]
+            
+        except Exception as e:
+            print(f"Error in get_user_all_tracks: {e}")
+            return await self.get_user_top_tracks(sp, "medium_term", 50)
+    
     async def build_user_profile(self, user_id: str, access_token: str):
         """Build user profile"""
         try:
@@ -73,205 +122,146 @@ class RecommendationEngine:
         except Exception as e:
             return {"error": str(e)}
     
-    def _get_random_seeds(self, top_tracks: List[Dict], num_seeds: int = 3) -> List[str]:
-        """Get random seed tracks from user's top tracks"""
-        if len(top_tracks) < num_seeds:
-            return [track['id'] for track in top_tracks]
-        
-        # Randomly sample from top tracks
-        random_tracks = random.sample(top_tracks, num_seeds)
-        return [track['id'] for track in random_tracks]
-    
-    def _add_variety_parameters(self) -> Dict[str, float]:
-        """Add random variety to audio features"""
-        # Use simpler, more reliable parameters
-        params = {}
-        
-        # Only add a few parameters to avoid API issues
-        if random.choice([True, False]):
-            params['target_energy'] = round(random.uniform(0.3, 0.9), 2)
-        
-        if random.choice([True, False]):
-            params['target_valence'] = round(random.uniform(0.2, 0.8), 2)
-            
-        if random.choice([True, False]):
-            params['target_danceability'] = round(random.uniform(0.3, 0.9), 2)
-        
-        # Sometimes add tempo ranges
-        if random.choice([True, False]):
-            min_tempo = random.randint(80, 120)
-            max_tempo = random.randint(min_tempo + 20, 180)
-            params['min_tempo'] = min_tempo
-            params['max_tempo'] = max_tempo
-            
-        print(f"Using variety params: {params}")
-        return params
-    
     async def generate_recommendations(self, user_id: str, access_token: str, seed_tracks=None, target_features=None, limit: int = 20):
-        """Generate recommendations with proper randomization"""
+        """Generate NEW music recommendations based on user's taste"""
         try:
             sp = await self.get_spotify_client(access_token)
             
-            # Get user's top tracks as potential seeds
-            top_tracks = await self.get_user_top_tracks(sp, limit=50)
+            all_user_tracks = await self.get_user_all_tracks(sp, limit=200)
             
-            if not top_tracks:
+            if not all_user_tracks:
                 return []
+            
+            user_track_ids = {track['id'] for track in all_user_tracks}
+            print(f"Filtering out {len(user_track_ids)} existing user tracks")
             
             enhanced_recs = []
             
-            # Strategy 1: Multiple randomized Spotify API calls
-            for attempt in range(3):  # Try 3 different seed combinations
+            attempts = 0
+            max_attempts = 10
+            
+            while len(enhanced_recs) < limit and attempts < max_attempts:
                 try:
-                    # Use different random seeds each time
-                    if seed_tracks is None:
-                        current_seeds = self._get_random_seeds(top_tracks, 2)
-                    else:
-                        current_seeds = seed_tracks[:2]
+                    seed_track = random.choice(all_user_tracks)
+                    seed_id = seed_track['id']
                     
-                    # Add variety parameters
-                    variety_params = self._add_variety_parameters()
+                    print(f"Attempt {attempts + 1}: Using seed '{seed_track['name']}' by {seed_track['artists'][0]['name']}")
                     
                     recommendations = sp.recommendations(
-                        seed_tracks=current_seeds,
-                        limit=min(limit // 3, 10),  # Divide limit across attempts
-                        **variety_params
+                        seed_tracks=[seed_id],
+                        limit=20
                     )
                     
+                    new_tracks_found = 0
                     for track in recommendations['tracks']:
-                        # Avoid duplicates
-                        if not any(t['id'] == track['id'] for t in enhanced_recs):
-                            enhanced_recs.append({
-                                'id': track['id'],
-                                'name': track['name'],
-                                'artists': [artist['name'] for artist in track['artists']],
-                                'album': track['album']['name'],
-                                'preview_url': track.get('preview_url'),
-                                'external_urls': track.get('external_urls', {}),
-                                'similarity_score': round(random.uniform(0.75, 0.95), 2),
-                                'recommendation_reason': f"AI recommended (variation {attempt + 1})"
-                            })
+                        if track['id'] not in user_track_ids:
+                            if not any(t['id'] == track['id'] for t in enhanced_recs):
+                                enhanced_recs.append({
+                                    'id': track['id'],
+                                    'name': track['name'],
+                                    'artists': [artist['name'] for artist in track['artists']],
+                                    'album': track['album']['name'],
+                                    'preview_url': track.get('preview_url'),
+                                    'external_urls': track.get('external_urls', {}),
+                                    'similarity_score': round(random.uniform(0.75, 0.95), 2),
+                                    'recommendation_reason': f"Because you like {seed_track['name']}"
+                                })
+                                new_tracks_found += 1
+                                
+                                if len(enhanced_recs) >= limit:
+                                    break
                     
+                    print(f"Found {new_tracks_found} new tracks from this seed")
+                    
+                except Exception as rec_error:
+                    print(f"Attempt {attempts + 1} failed: {rec_error}")
+                
+                attempts += 1
+            
+            if len(enhanced_recs) < limit:
+                print("Using artist-based recommendations for remaining slots...")
+                
+                user_artists = list(set([track['artists'][0]['id'] for track in all_user_tracks]))
+                random.shuffle(user_artists)
+                
+                for artist_id in user_artists[:5]:
                     if len(enhanced_recs) >= limit:
                         break
                         
-                except Exception as rec_error:
-                    print(f"Spotify recommendations attempt {attempt + 1} failed: {rec_error}")
-                    
-                    # If it's the first attempt and failed, try a different approach
-                    if attempt == 0:
-                        try:
-                            # Try with a completely different seed track
-                            different_seed = self._get_random_seeds(all_user_tracks, 1)
-                            if different_seed and different_seed[0] != valid_seed:
-                                print(f"Trying with different seed: {different_seed[0]}")
-                                recommendations = sp.recommendations(
-                                    seed_tracks=different_seed,
-                                    limit=min(limit // 3, 10)
-                                )
-                                
-                                for track in recommendations['tracks']:
-                                    if not any(t['id'] == track['id'] for t in enhanced_recs):
-                                        enhanced_recs.append({
-                                            'id': track['id'],
-                                            'name': track['name'],
-                                            'artists': [artist['name'] for artist in track['artists']],
-                                            'album': track['album']['name'],
-                                            'preview_url': track.get('preview_url'),
-                                            'external_urls': track.get('external_urls', {}),
-                                            'similarity_score': round(random.uniform(0.75, 0.95), 2),
-                                            'recommendation_reason': f"Alternative recommendation"
-                                        })
-                        except Exception as e:
-                            print(f"Alternative seed also failed: {e}")
-                    
-                    continue
-            
-            # Strategy 2: Random related artists if we need more tracks
-            if len(enhanced_recs) < limit:
-                try:
-                    # Pick random artists from top tracks
-                    random_top_tracks = random.sample(top_tracks, min(5, len(top_tracks)))
-                    
-                    for track in random_top_tracks:
-                        if len(enhanced_recs) >= limit:
-                            break
-                            
-                        artist_id = track['artists'][0]['id']
-                        related = sp.artist_related_artists(artist_id)
-                        
-                        # Randomly select related artists
-                        random_related = random.sample(
-                            related['artists'], 
-                            min(3, len(related['artists']))
+                    try:
+                        recommendations = sp.recommendations(
+                            seed_artists=[artist_id],
+                            limit=10
                         )
                         
-                        for related_artist in random_related:
-                            if len(enhanced_recs) >= limit:
-                                break
-                                
-                            artist_top = sp.artist_top_tracks(related_artist['id'])
-                            
-                            # Randomly pick from their top tracks
-                            random_tracks = random.sample(
-                                artist_top['tracks'], 
-                                min(2, len(artist_top['tracks']))
-                            )
-                            
-                            for top_track in random_tracks:
-                                if len(enhanced_recs) >= limit:
-                                    break
+                        for track in recommendations['tracks']:
+                            if track['id'] not in user_track_ids:
+                                if not any(t['id'] == track['id'] for t in enhanced_recs):
+                                    artist_name = next(
+                                        (t['artists'][0]['name'] for t in all_user_tracks 
+                                         if t['artists'][0]['id'] == artist_id), 
+                                        "Unknown Artist"
+                                    )
                                     
-                                # Avoid duplicates
-                                if not any(t['id'] == top_track['id'] for t in enhanced_recs):
                                     enhanced_recs.append({
-                                        'id': top_track['id'],
-                                        'name': top_track['name'],
-                                        'artists': [artist['name'] for artist in top_track['artists']],
-                                        'album': top_track['album']['name'],
-                                        'preview_url': top_track.get('preview_url'),
-                                        'external_urls': top_track.get('external_urls', {}),
+                                        'id': track['id'],
+                                        'name': track['name'],
+                                        'artists': [artist['name'] for artist in track['artists']],
+                                        'album': track['album']['name'],
+                                        'preview_url': track.get('preview_url'),
+                                        'external_urls': track.get('external_urls', {}),
                                         'similarity_score': round(random.uniform(0.65, 0.85), 2),
-                                        'recommendation_reason': f"From {related_artist['name']} (similar to {track['artists'][0]['name']})"
+                                        'recommendation_reason': f"Similar to {artist_name}"
                                     })
                                     
-                except Exception as related_error:
-                    print(f"Related artists strategy failed: {related_error}")
+                                    if len(enhanced_recs) >= limit:
+                                        break
+                                        
+                    except Exception as artist_error:
+                        print(f"Artist recommendation failed: {artist_error}")
+                        continue
             
-            # Strategy 3: Mix in some user's own tracks with different reasons (last resort)
             if len(enhanced_recs) < limit:
-                remaining_needed = limit - len(enhanced_recs)
+                print("Using genre-based recommendations...")
                 
-                # Get random tracks from user's library
-                random_user_tracks = random.sample(
-                    top_tracks, 
-                    min(remaining_needed, len(top_tracks))
-                )
+                # Common genres to try
+                genres = ['pop', 'rock', 'hip-hop', 'electronic', 'indie', 'alternative', 'jazz', 'classical']
+                random.shuffle(genres)
                 
-                reasons = [
-                    "Rediscover this gem",
-                    "From your favorites",
-                    "You might have forgotten this",
-                    "Perfect for your taste",
-                    "Classic from your library"
-                ]
-                
-                for track in random_user_tracks:
-                    # Avoid duplicates
-                    if not any(t['id'] == track['id'] for t in enhanced_recs):
-                        enhanced_recs.append({
-                            'id': track['id'],
-                            'name': track['name'],
-                            'artists': [artist['name'] for artist in track['artists']],
-                            'album': track['album']['name'],
-                            'preview_url': track.get('preview_url'),
-                            'external_urls': track.get('external_urls', {}),
-                            'similarity_score': round(random.uniform(0.85, 0.98), 2),
-                            'recommendation_reason': random.choice(reasons)
-                        })
+                for genre in genres[:3]:
+                    if len(enhanced_recs) >= limit:
+                        break
+                        
+                    try:
+                        recommendations = sp.recommendations(
+                            seed_genres=[genre],
+                            limit=5
+                        )
+                        
+                        for track in recommendations['tracks']:
+                            if track['id'] not in user_track_ids:
+                                if not any(t['id'] == track['id'] for t in enhanced_recs):
+                                    enhanced_recs.append({
+                                        'id': track['id'],
+                                        'name': track['name'],
+                                        'artists': [artist['name'] for artist in track['artists']],
+                                        'album': track['album']['name'],
+                                        'preview_url': track.get('preview_url'),
+                                        'external_urls': track.get('external_urls', {}),
+                                        'similarity_score': round(random.uniform(0.60, 0.80), 2),
+                                        'recommendation_reason': f"Discover new {genre}"
+                                    })
+                                    
+                                    if len(enhanced_recs) >= limit:
+                                        break
+                                        
+                    except Exception as genre_error:
+                        print(f"Genre recommendation failed: {genre_error}")
+                        continue
             
-            # Shuffle the final results for extra randomness
             random.shuffle(enhanced_recs)
+            
+            print(f"Final result: {len(enhanced_recs)} NEW recommendations (filtered out {len(user_track_ids)} existing tracks)")
             
             return enhanced_recs[:limit]
             
@@ -315,7 +305,6 @@ class RecommendationEngine:
             }
         }
         
-        # Use mood-specific parameters
         target_features = mood_params.get(mood, {})
         
         return await self.generate_recommendations(

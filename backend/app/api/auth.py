@@ -45,25 +45,33 @@ async def get_current_user(credentials: HTTPBearer = Depends(oauth2_scheme)):
         spotify_id: str = payload.get("sub")
         if spotify_id is None:
             raise credentials_exception
-    except pyjwt.PyJWTError:
+            
+        print(f"JWT DECODED SPOTIFY_ID: {spotify_id}")
+        
+    except pyjwt.PyJWTError as e:
+        print(f"JWT DECODE ERROR: {e}")
         raise credentials_exception
     
-    # Get user from cache
     user_data = await get_cache(f"user:{spotify_id}")
+    print(f"CACHE DATA FOR {spotify_id}: {user_data}")
+    
     if user_data is None:
+        print(f"NO CACHE DATA FOUND FOR USER: {spotify_id}")
         raise credentials_exception
     
-    return json.loads(user_data)
+    parsed_data = json.loads(user_data)
+    print(f"RETURNING USER DATA: {parsed_data.get('display_name')} ({parsed_data.get('spotify_id')})")
+    return parsed_data
 
 @router.get("/login")
 async def login(force: bool = Query(False, description="Force fresh authentication")):
     """Initiate Spotify OAuth flow"""
     sp_oauth = get_spotify_oauth()
-    auth_url = sp_oauth.get_authorize_url()
     
-    # Force fresh login if requested
     if force:
-        auth_url += "&show_dialog=true"
+        auth_url = sp_oauth.get_authorize_url(show_dialog=True)
+    else:
+        auth_url = sp_oauth.get_authorize_url()
     
     return {"auth_url": auth_url}
 
@@ -77,6 +85,11 @@ async def callback(code: str, db: Session = Depends(get_db)):
         sp = spotipy.Spotify(auth=token_info['access_token'])
         spotify_user = sp.current_user()
         
+        print(f"SPOTIFY USER FROM API: {spotify_user['id']} - {spotify_user.get('display_name', 'No Name')}")
+        print(f"SPOTIFY EMAIL: {spotify_user.get('email', 'No Email')}")
+        
+        await delete_cache(f"user:{spotify_user['id']}")
+        
         user = db.query(User).filter(User.spotify_id == spotify_user['id']).first()
         if not user:
             user_data = UserCreate(
@@ -87,27 +100,35 @@ async def callback(code: str, db: Session = Depends(get_db)):
             )
             user = User(**user_data.dict())
             db.add(user)
+            print(f"CREATED NEW USER: {user.spotify_id}")
         else:
             user.spotify_tokens = token_info
             user.last_login = datetime.utcnow()
+            print(f"UPDATED EXISTING USER: {user.spotify_id}")
         
         db.commit()
         
         access_token = create_access_token(data={"sub": user.spotify_id})
+        print(f"ACCESS TOKEN BEING CREATED FOR: {user.spotify_id}")
         
-        await set_cache(f"user:{user.spotify_id}", json.dumps({
+        user_cache_data = {
             "id": user.id,
             "spotify_id": user.spotify_id,
             "display_name": user.display_name,
             "spotify_tokens": token_info
-        }))
+        }
+        
+        await set_cache(f"user:{user.spotify_id}", json.dumps(user_cache_data))
+        
+        print(f"Successfully authenticated user: {user.display_name} ({user.spotify_id})")
         
         return RedirectResponse(
-            url=f"http://localhost:3000/dashboard?token={access_token}",
+            url=f"http://localhost:3000/dashboard?token={access_token}&fresh=true",
             status_code=302
         )
         
     except Exception as e:
+        print(f"Authentication error: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Authentication failed: {str(e)}"
@@ -122,14 +143,18 @@ async def get_current_user_info(current_user: dict = Depends(get_current_user)):
 async def logout(current_user: dict = Depends(get_current_user)):
     """Clear user session and force fresh authentication"""
     try:
-        # Clear user cache
-        await delete_cache(f"user:{current_user['spotify_id']}")
+        spotify_id = current_user['spotify_id']
+        print(f"Logging out user: {current_user.get('display_name')} ({spotify_id})")
         
-        return {"message": "Logged out successfully"}
+        await delete_cache(f"user:{spotify_id}")
+        
+        await delete_cache(f"recommendations:{spotify_id}")
+        await delete_cache(f"profile:{spotify_id}")
+        
+        return {"message": "Logged out successfully", "spotify_id": spotify_id}
         
     except Exception as e:
-        # Even if cache deletion fails, return success
-        # Frontend will handle clearing local storage
+        print(f"Logout error: {str(e)}")
         return {"message": "Logged out successfully"}
 
 @router.post("/refresh")
