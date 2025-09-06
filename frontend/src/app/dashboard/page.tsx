@@ -1,7 +1,6 @@
 'use client'
 
 import React, { useState, useEffect } from 'react';
-import { useSearchParams, useRouter } from 'next/navigation';
 import { Music, BarChart3, Sparkles, User, PlayCircle, Heart, TrendingUp, Loader2 } from 'lucide-react';
 
 const API_BASE = 'http://localhost:8000';
@@ -101,6 +100,12 @@ const Sidebar = ({ activeTab, setActiveTab, userDisplayName }) => {
         <div className="mb-6 p-3 bg-white/5 rounded-lg">
           <p className="text-sm text-gray-400">Welcome back,</p>
           <p className="text-white font-semibold">{userDisplayName}</p>
+          <button 
+            onClick={() => window.location.href = '/login'}
+            className="mt-2 w-full text-xs text-gray-400 hover:text-white py-1 px-2 rounded border border-gray-600 hover:border-gray-400 transition-colors"
+          >
+            Switch Account
+          </button>
         </div>
       )}
       
@@ -140,12 +145,12 @@ const AudioFeatureRadar = ({ userProfile }: { userProfile: UserProfile | null })
   }
 
   const features = [
-    { name: 'Energy', value: userProfile.avg_features.energy, color: '#FF6B6B' },
-    { name: 'Valence', value: userProfile.avg_features.valence, color: '#4ECDC4' },
-    { name: 'Dance', value: userProfile.avg_features.danceability, color: '#45B7D1' },
-    { name: 'Acoustic', value: userProfile.avg_features.acousticness, color: '#96CEB4' },
-    { name: 'Speech', value: userProfile.avg_features.speechiness, color: '#FFEAA7' },
-    { name: 'Liveness', value: userProfile.avg_features.liveness, color: '#DDA0DD' },
+    { name: 'Energy', value: userProfile?.avg_features?.energy || 0, color: '#FF6B6B' },
+    { name: 'Valence', value: userProfile?.avg_features?.valence || 0, color: '#4ECDC4' },
+    { name: 'Dance', value: userProfile?.avg_features?.danceability || 0, color: '#45B7D1' },
+    { name: 'Acoustic', value: userProfile?.avg_features?.acousticness || 0, color: '#96CEB4' },
+    { name: 'Speech', value: userProfile?.avg_features?.speechiness || 0, color: '#FFEAA7' },
+    { name: 'Liveness', value: userProfile?.avg_features?.liveness || 0, color: '#DDA0DD' },
   ];
 
   return (
@@ -299,7 +304,7 @@ const DashboardContent = ({
           </div>
         ) : recommendations.length > 0 ? (
           <div className="space-y-3">
-            {recommendations.slice(0, 4).map((track, index) => (
+            {recommendations.map((track, index) => (
               <RecommendationCard key={track.id || index} track={track} />
             ))}
           </div>
@@ -360,20 +365,20 @@ export default function DashboardLayout() {
   const [recommendations, setRecommendations] = useState<RecommendationTrack[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [token, setToken] = useState<string | null>(null);
-  
-  const searchParams = useSearchParams();
-  const router = useRouter();
 
   useEffect(() => {
-    const urlToken = searchParams.get('token');
+    // Get token from URL - no redirects for debugging
+    const params = new URLSearchParams(window.location.search);
+    const urlToken = params.get('token');
+    
+    console.log('Token check:', urlToken ? 'Found' : 'Not found');
+    
     if (urlToken) {
       setToken(urlToken);
-      router.replace('/dashboard');
-    } else {
-      window.location.href = '/login';
-      return null;
+      window.history.replaceState({}, '', '/dashboard');
     }
-  }, [searchParams, router]);
+    // Removed the redirect to login - stay on dashboard regardless
+  }, []);
 
   useEffect(() => {
     if (token) {
@@ -424,12 +429,41 @@ export default function DashboardLayout() {
     
     setIsLoading(true);
     try {
-      const recs = await generateMoodPlaylist(token, mood, 8);
+      const recs = await generateMoodPlaylist(token, mood);
       setRecommendations(recs);
     } catch (error) {
       console.error('Error generating mood playlist:', error);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      // Clear local token
+      setToken(null);
+      setUserProfile(null);
+      setCurrentUser(null);
+      setRecommendations([]);
+      
+      // Clear browser storage
+      localStorage.clear();
+      sessionStorage.clear();
+      
+      // Call backend logout (optional)
+      if (token) {
+        await fetch(`${API_BASE}/api/auth/logout`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}` },
+        });
+      }
+      
+      // Redirect to login with force fresh auth
+      window.location.href = '/login?force=true';
+    } catch (error) {
+      console.error('Error logging out:', error);
+      // Force redirect anyway
+      window.location.href = '/login?force=true';
     }
   };
 
