@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useState, useEffect } from 'react';
-import { Music, BarChart3, Sparkles, User, PlayCircle, Heart, TrendingUp, Loader2 } from 'lucide-react';
+import { Music, BarChart3, Sparkles, User, PlayCircle, Heart, TrendingUp, Loader2, Clock, Star } from 'lucide-react';
 
 const API_BASE = 'http://localhost:8000';
 
@@ -26,6 +26,15 @@ interface RecommendationTrack {
   artists: string[];
   recommendation_reason: string;
   similarity_score: number;
+  preview_url?: string;
+}
+
+interface TopTrack {
+  id: string;
+  name: string;
+  artists: { name: string }[];
+  album: { name: string };
+  popularity: number;
   preview_url?: string;
 }
 
@@ -358,6 +367,328 @@ const DashboardContent = ({
   );
 };
 
+// NEW DISCOVER TAB COMPONENT
+const DiscoverTab = ({ token }: { token: string }) => {
+  const [discoverType, setDiscoverType] = useState('similar');
+  const [isLoading, setIsLoading] = useState(false);
+  const [recommendations, setRecommendations] = useState<RecommendationTrack[]>([]);
+
+  const discoverOptions = [
+    { id: 'similar', label: 'Similar to My Taste', description: 'Based on your listening history' },
+    { id: 'new-genres', label: 'New Genres', description: 'Explore different musical styles' },
+    { id: 'trending', label: 'Trending Now', description: 'Popular tracks worldwide' },
+    { id: 'deep-cuts', label: 'Deep Cuts', description: 'Hidden gems and B-sides' },
+  ];
+
+  const moodOptions = [
+    { id: 'happy', label: 'Happy', color: 'from-yellow-500 to-orange-500' },
+    { id: 'energetic', label: 'Energetic', color: 'from-red-500 to-pink-500' },
+    { id: 'chill', label: 'Chill', color: 'from-blue-500 to-cyan-500' },
+    { id: 'focus', label: 'Focus', color: 'from-purple-500 to-indigo-500' },
+    { id: 'sad', label: 'Melancholy', color: 'from-gray-500 to-blue-500' },
+    { id: 'party', label: 'Party', color: 'from-green-500 to-emerald-500' },
+  ];
+
+  const handleDiscoverMusic = async (type: string) => {
+    setIsLoading(true);
+    try {
+      let response;
+      if (['similar', 'new-genres', 'trending', 'deep-cuts'].includes(type)) {
+        response = await fetch(`${API_BASE}/api/recommendations/discover/${type}?limit=12`, {
+          headers: { 'Authorization': `Bearer ${token}` },
+        });
+        const data = await response.json();
+        setRecommendations(data.tracks || []);
+      } else {
+        // Mood-based
+        response = await fetch(`${API_BASE}/api/recommendations/mood-playlist`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ mood: type, limit: 12 }),
+        });
+        const data = await response.json();
+        setRecommendations(data.tracks || []);
+      }
+    } catch (error) {
+      console.error('Error discovering music:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-2xl font-bold text-white mb-2">Discover New Music</h2>
+        <p className="text-gray-300">AI-powered music discovery tailored to your taste</p>
+      </div>
+
+      <GlassCard>
+        <h3 className="text-lg font-semibold text-white mb-4">Discovery Mode</h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {discoverOptions.map((option) => (
+            <button
+              key={option.id}
+              onClick={() => {
+                setDiscoverType(option.id);
+                handleDiscoverMusic(option.id);
+              }}
+              className={`p-4 rounded-xl border-2 transition-all duration-200 text-left ${
+                discoverType === option.id
+                  ? 'border-green-500 bg-green-500/10'
+                  : 'border-white/20 hover:border-white/40 hover:bg-white/5'
+              }`}
+            >
+              <h4 className="font-medium text-white text-sm">{option.label}</h4>
+              <p className="text-xs text-gray-400 mt-1">{option.description}</p>
+            </button>
+          ))}
+        </div>
+      </GlassCard>
+
+      <GlassCard>
+        <h3 className="text-lg font-semibold text-white mb-4">Mood-Based Discovery</h3>
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+          {moodOptions.map((mood) => (
+            <button
+              key={mood.id}
+              onClick={() => handleDiscoverMusic(mood.id)}
+              className={`p-4 rounded-xl bg-gradient-to-br ${mood.color} hover:scale-105 transition-all duration-200 text-white font-medium text-sm`}
+            >
+              {mood.label}
+            </button>
+          ))}
+        </div>
+      </GlassCard>
+
+      <GlassCard>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-semibold text-white">Discovered Tracks</h3>
+          {recommendations.length > 0 && (
+            <button 
+              onClick={() => handleDiscoverMusic(discoverType)}
+              className="text-sm text-green-400 hover:text-green-300 transition-colors"
+            >
+              Refresh
+            </button>
+          )}
+        </div>
+        
+        {isLoading ? (
+          <div className="flex items-center justify-center h-32">
+            <Loader2 className="w-8 h-8 animate-spin text-green-500" />
+          </div>
+        ) : recommendations.length > 0 ? (
+          <div className="space-y-3">
+            {recommendations.map((track, index) => (
+              <RecommendationCard key={track.id || index} track={track} />
+            ))}
+          </div>
+        ) : (
+          <div className="text-center py-8">
+            <Sparkles className="w-12 h-12 text-gray-400 mx-auto mb-4" />
+            <p className="text-gray-400 mb-4">Choose a discovery mode to find new music</p>
+            <button 
+              onClick={() => handleDiscoverMusic('similar')}
+              className="bg-green-500 text-white px-6 py-2 rounded-lg hover:bg-green-600 transition-colors"
+            >
+              Start Discovering
+            </button>
+          </div>
+        )}
+      </GlassCard>
+    </div>
+  );
+};
+
+// NEW ANALYTICS TAB COMPONENT
+const AnalyticsTab = ({ token, userProfile }: { token: string; userProfile: UserProfile | null }) => {
+  const [timeRange, setTimeRange] = useState('medium_term');
+  const [topTracks, setTopTracks] = useState<TopTrack[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+
+  const timeRanges = [
+    { id: 'short_term', label: 'Last 4 Weeks' },
+    { id: 'medium_term', label: 'Last 6 Months' },
+    { id: 'long_term', label: 'All Time' },
+  ];
+
+  useEffect(() => {
+    if (token) {
+      loadTopTracks();
+    }
+  }, [token, timeRange]);
+
+  const loadTopTracks = async () => {
+    setIsLoading(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/recommendations/top-tracks?time_range=${timeRange}&limit=20`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      const data = await response.json();
+      setTopTracks(data.top_tracks || []);
+    } catch (error) {
+      console.error('Error loading top tracks:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const AudioFeatureChart = ({ feature, value, color }: { feature: string; value: number; color: string }) => (
+    <div className="bg-white/5 rounded-lg p-4">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-sm font-medium text-white capitalize">{feature}</span>
+        <span className="text-sm text-gray-400">{Math.round(value * 100)}%</span>
+      </div>
+      <div className="w-full bg-gray-700 rounded-full h-2">
+        <div 
+          className="h-2 rounded-full transition-all duration-500"
+          style={{ 
+            width: `${value * 100}%`,
+            backgroundColor: color,
+            boxShadow: `0 0 10px ${color}40`
+          }}
+        />
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-2xl font-bold text-white mb-2">Music Analytics</h2>
+        <p className="text-gray-300">Deep insights into your musical preferences and listening patterns</p>
+      </div>
+
+      <GlassCard>
+        <h3 className="text-lg font-semibold text-white mb-4">Time Period</h3>
+        <div className="flex gap-3">
+          {timeRanges.map((range) => (
+            <button
+              key={range.id}
+              onClick={() => setTimeRange(range.id)}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all duration-200 ${
+                timeRange === range.id
+                  ? 'bg-green-500 text-white'
+                  : 'bg-white/10 text-gray-300 hover:bg-white/20'
+              }`}
+            >
+              <Clock className="w-4 h-4" />
+              <span className="text-sm font-medium">{range.label}</span>
+            </button>
+          ))}
+        </div>
+      </GlassCard>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <GlassCard>
+          <h3 className="text-lg font-semibold text-white mb-4">Your Music DNA</h3>
+          {userProfile ? (
+            <div className="space-y-3">
+              <AudioFeatureChart feature="energy" value={userProfile.avg_features.energy} color="#ff6b6b" />
+              <AudioFeatureChart feature="danceability" value={userProfile.avg_features.danceability} color="#4ecdc4" />
+              <AudioFeatureChart feature="valence" value={userProfile.avg_features.valence} color="#45b7d1" />
+              <AudioFeatureChart feature="acousticness" value={userProfile.avg_features.acousticness} color="#96ceb4" />
+              <AudioFeatureChart feature="speechiness" value={userProfile.avg_features.speechiness} color="#ffeaa7" />
+              <AudioFeatureChart feature="liveness" value={userProfile.avg_features.liveness} color="#dda0dd" />
+            </div>
+          ) : (
+            <div className="flex items-center justify-center h-48">
+              <Loader2 className="w-8 h-8 animate-spin text-green-500" />
+            </div>
+          )}
+        </GlassCard>
+
+        <GlassCard>
+          <h3 className="text-lg font-semibold text-white mb-4">Listening Statistics</h3>
+          <div className="space-y-4">
+            <div className="bg-gradient-to-r from-purple-500/20 to-pink-500/20 rounded-lg p-4">
+              <div className="flex items-center gap-3">
+                <Music className="w-6 h-6 text-purple-400" />
+                <div>
+                  <p className="text-sm text-gray-300">Tracks Analyzed</p>
+                  <p className="text-2xl font-bold text-white">{userProfile?.total_tracks_analyzed || 0}</p>
+                </div>
+              </div>
+            </div>
+            
+            <div className="bg-gradient-to-r from-green-500/20 to-emerald-500/20 rounded-lg p-4">
+              <div className="flex items-center gap-3">
+                <TrendingUp className="w-6 h-6 text-green-400" />
+                <div>
+                  <p className="text-sm text-gray-300">Top Tracks ({timeRanges.find(r => r.id === timeRange)?.label})</p>
+                  <p className="text-2xl font-bold text-white">{topTracks.length}</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-gradient-to-r from-blue-500/20 to-cyan-500/20 rounded-lg p-4">
+              <div className="flex items-center gap-3">
+                <BarChart3 className="w-6 h-6 text-blue-400" />
+                <div>
+                  <p className="text-sm text-gray-300">Average Tempo</p>
+                  <p className="text-2xl font-bold text-white">{Math.round(userProfile?.avg_features.tempo || 120)} BPM</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </GlassCard>
+      </div>
+
+      <GlassCard>
+        <h3 className="text-lg font-semibold text-white mb-4">
+          Your Top Tracks ({timeRanges.find(r => r.id === timeRange)?.label})
+        </h3>
+        {isLoading ? (
+          <div className="flex items-center justify-center h-32">
+            <Loader2 className="w-8 h-8 animate-spin text-green-500" />
+          </div>
+        ) : topTracks.length > 0 ? (
+          <div className="space-y-3">
+            {topTracks.slice(0, 10).map((track, index) => (
+              <div key={track.id} className="flex items-center gap-3 p-3 bg-white/5 rounded-lg">
+                <div className="w-8 h-8 bg-gradient-to-br from-green-500 to-green-600 rounded-lg flex items-center justify-center">
+                  <span className="text-white font-bold text-sm">#{index + 1}</span>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h4 className="font-medium text-white truncate">{track.name}</h4>
+                  <p className="text-sm text-gray-400 truncate">
+                    {track.artists?.map(a => a.name).join(', ')}
+                  </p>
+                  {track.popularity && (
+                    <div className="flex items-center gap-1 mt-1">
+                      <Star className="w-3 h-3 text-yellow-500 fill-current" />
+                      <span className="text-xs text-gray-400">{track.popularity}% popularity</span>
+                    </div>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center hover:bg-pink-500/20 transition-colors">
+                    <Heart className="w-4 h-4 text-gray-300" />
+                  </button>
+                  {track.preview_url && (
+                    <button className="w-8 h-8 rounded-full bg-green-500/20 flex items-center justify-center hover:bg-green-500/30 transition-colors">
+                      <PlayCircle className="w-4 h-4 text-green-500" />
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="text-center py-8">
+            <BarChart3 className="w-12 h-12 text-gray-400 mx-auto mb-4" />
+            <p className="text-gray-400">No top tracks data available for this period</p>
+          </div>
+        )}
+      </GlassCard>
+    </div>
+  );
+};
+
 export default function DashboardLayout() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
@@ -505,22 +836,12 @@ export default function DashboardLayout() {
               onGenerateMoodPlaylist={handleGenerateMoodPlaylist}
             />
           )}
-          {activeTab === 'discover' && (
-            <GlassCard>
-              <h2 className="text-2xl font-bold text-white mb-4">Discover New Music</h2>
-              <p className="text-gray-300">AI-powered music discovery coming soon...</p>
-            </GlassCard>
-          )}
+          {activeTab === 'discover' && <DiscoverTab token={token} />}
+          {activeTab === 'analytics' && <AnalyticsTab token={token} userProfile={userProfile} />}
           {activeTab === 'playlists' && (
             <GlassCard>
               <h2 className="text-2xl font-bold text-white mb-4">Your Playlists</h2>
               <p className="text-gray-300">Playlist management coming soon...</p>
-            </GlassCard>
-          )}
-          {activeTab === 'analytics' && (
-            <GlassCard>
-              <h2 className="text-2xl font-bold text-white mb-4">Music Analytics</h2>
-              <p className="text-gray-300">Advanced analytics dashboard coming soon...</p>
             </GlassCard>
           )}
           {activeTab === 'profile' && (

@@ -206,3 +206,62 @@ async def get_user_top_tracks(
             status_code=500,
             detail=f"Error getting top tracks: {str(e)}"
         )
+    
+@router.get("/discover/{discover_type}")
+async def discover_music(
+    discover_type: str,
+    limit: int = Query(12, ge=1, le=50),
+    current_user: dict = Depends(get_current_user)
+):
+    """Discover music by type: similar, new-genres, trending, deep-cuts"""
+    try:
+        spotify_tokens = current_user.get("spotify_tokens", {})
+        access_token = spotify_tokens.get("access_token")
+        
+        if not access_token:
+            raise HTTPException(status_code=401, detail="Spotify access token not found")
+        
+        # Map discover types to mood/strategy
+        discover_mapping = {
+            'similar': None,  # Use regular recommendations
+            'new-genres': 'focus',  # Use focus mood as placeholder for genre exploration
+            'trending': 'party',    # Use party mood for trending
+            'deep-cuts': 'chill'    # Use chill for deep cuts
+        }
+        
+        if discover_type == 'similar':
+            recommendations = await recommendation_engine.generate_recommendations(
+                user_id=current_user["spotify_id"],
+                access_token=access_token,
+                limit=limit
+            )
+        else:
+            mood = discover_mapping.get(discover_type, 'chill')
+            recommendations = await recommendation_engine.generate_mood_playlist(
+                user_id=current_user["spotify_id"],
+                access_token=access_token,
+                mood=mood,
+                limit=limit
+            )
+        
+        return {"tracks": recommendations, "discover_type": discover_type}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error discovering music: {str(e)}")
+
+@router.get("/genres")
+async def get_available_genres(current_user: dict = Depends(get_current_user)):
+    """Get available genre seeds from Spotify"""
+    try:
+        # Spotify's available genre seeds (static list)
+        genres = [
+            'acoustic', 'afrobeat', 'alt-rock', 'alternative', 'ambient',
+            'blues', 'bossanova', 'brazil', 'breakbeat', 'british',
+            'chill', 'classical', 'club', 'country', 'dance',
+            'electronic', 'folk', 'funk', 'garage', 'gospel',
+            'hip-hop', 'house', 'indie', 'jazz', 'latin',
+            'pop', 'punk', 'reggae', 'rock', 'soul'
+        ]
+        return {"genres": genres}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting genres: {str(e)}")

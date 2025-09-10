@@ -3,7 +3,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.security import HTTPBearer
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
-import jwt as pyjwt
+import jwt
 from datetime import datetime, timedelta
 from typing import Optional
 import json
@@ -29,8 +29,16 @@ def create_access_token(data: dict):
     to_encode = data.copy()
     expire = datetime.utcnow() + timedelta(minutes=settings.access_token_expire_minutes)
     to_encode.update({"exp": expire})
-    encoded_jwt = pyjwt.encode(to_encode, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
-    return encoded_jwt
+    
+    try:
+        encoded_jwt = jwt.encode(to_encode, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
+        return encoded_jwt
+    except Exception as e:
+        print(f"JWT ENCODE ERROR: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Token creation failed: {str(e)}"
+        )
 
 async def get_current_user(credentials: HTTPBearer = Depends(oauth2_scheme)):
     credentials_exception = HTTPException(
@@ -41,15 +49,25 @@ async def get_current_user(credentials: HTTPBearer = Depends(oauth2_scheme)):
     
     try:
         token = credentials.credentials
-        payload = pyjwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
+        payload = jwt.decode(
+            token, 
+            settings.jwt_secret_key, 
+            algorithms=[settings.jwt_algorithm]
+        )
         spotify_id: str = payload.get("sub")
         if spotify_id is None:
             raise credentials_exception
             
         print(f"JWT DECODED SPOTIFY_ID: {spotify_id}")
         
-    except pyjwt.PyJWTError as e:
+    except jwt.InvalidTokenError as e:
         print(f"JWT DECODE ERROR: {e}")
+        raise credentials_exception
+    except jwt.ExpiredSignatureError as e:
+        print(f"JWT EXPIRED ERROR: {e}")
+        raise credentials_exception
+    except Exception as e:
+        print(f"JWT GENERAL ERROR: {e}")
         raise credentials_exception
     
     user_data = await get_cache(f"user:{spotify_id}")
@@ -59,9 +77,13 @@ async def get_current_user(credentials: HTTPBearer = Depends(oauth2_scheme)):
         print(f"NO CACHE DATA FOUND FOR USER: {spotify_id}")
         raise credentials_exception
     
-    parsed_data = json.loads(user_data)
-    print(f"RETURNING USER DATA: {parsed_data.get('display_name')} ({parsed_data.get('spotify_id')})")
-    return parsed_data
+    try:
+        parsed_data = json.loads(user_data)
+        print(f"RETURNING USER DATA: {parsed_data.get('display_name')} ({parsed_data.get('spotify_id')})")
+        return parsed_data
+    except json.JSONDecodeError as e:
+        print(f"JSON DECODE ERROR: {e}")
+        raise credentials_exception
 
 @router.get("/login")
 async def login(force: bool = Query(False, description="Force fresh authentication")):
