@@ -44,38 +44,115 @@ class RecommendationEngine:
             print(f"Error getting top tracks: {e}")
             return []
     
-    async def get_user_all_tracks(self, sp: spotipy.Spotify, limit: int = 800):
-        """Get tracks from user's library, playlists, and top tracks"""
+    async def get_user_all_tracks(self, sp: spotipy.Spotify, limit: int = 2000):
+        """Get tracks from user's library, playlists, and top tracks with pagination"""
         all_tracks = []
         
         try:
+            print("Fetching top tracks...")
             for time_range in ['short_term', 'medium_term', 'long_term']:
-                top_tracks = await self.get_user_top_tracks(sp, time_range, 20)
+                top_tracks = await self.get_user_top_tracks(sp, time_range, 50)
                 all_tracks.extend(top_tracks)
+                print(f"Added {len(top_tracks)} {time_range} top tracks")
             
-            try:
-                saved_tracks = sp.current_user_saved_tracks(limit=50)
-                for item in saved_tracks['items']:
-                    all_tracks.append(item['track'])
-                print(f"Added {len(saved_tracks['items'])} saved tracks")
-            except Exception as e:
-                print(f"Error getting saved tracks: {e}")
+            print("Fetching saved tracks...")
+            offset = 0
+            while len(all_tracks) < limit:
+                try:
+                    saved_batch = sp.current_user_saved_tracks(limit=50, offset=offset)
+                    if not saved_batch['items']:
+                        break
+                        
+                    for item in saved_batch['items']:
+                        if item['track'] and item['track']['id']:
+                            all_tracks.append(item['track'])
+                    
+                    print(f"Added {len(saved_batch['items'])} saved tracks (offset: {offset})")
+                    
+                    if len(saved_batch['items']) < 50:
+                        break
+                        
+                    offset += 50
+                    
+                except Exception as e:
+                    print(f"Error getting saved tracks at offset {offset}: {e}")
+                    break
             
+            print("Fetching playlist tracks...")
+            user_id = sp.me()['id']
+            
+            playlist_offset = 0
+            all_playlists = []
+            
+            while True:
+                try:
+                    playlist_batch = sp.current_user_playlists(limit=50, offset=playlist_offset)
+                    if not playlist_batch['items']:
+                        break
+                        
+                    all_playlists.extend(playlist_batch['items'])
+                    
+                    if len(playlist_batch['items']) < 50:
+                        break
+                        
+                    playlist_offset += 50
+                    
+                except Exception as e:
+                    print(f"Error getting playlists at offset {playlist_offset}: {e}")
+                    break
+            
+            print(f"Found {len(all_playlists)} total playlists")
+            
+            for i, playlist in enumerate(all_playlists):
+                if len(all_tracks) >= limit:
+                    break
+                    
+                if playlist['owner']['id'] != user_id:
+                    continue
+                    
+                print(f"Processing playlist {i+1}/{len(all_playlists)}: {playlist['name']}")
+                
+                track_offset = 0
+                playlist_track_count = 0
+                
+                while len(all_tracks) < limit:
+                    try:
+                        track_batch = sp.playlist_tracks(
+                            playlist['id'], 
+                            limit=100,
+                            offset=track_offset
+                        )
+                        
+                        if not track_batch['items']:
+                            break
+                        
+                        for item in track_batch['items']:
+                            if item['track'] and item['track']['id']:
+                                all_tracks.append(item['track'])
+                                playlist_track_count += 1
+                        
+                        if len(track_batch['items']) < 100:
+                            break
+                            
+                        track_offset += 100
+                        
+                    except Exception as e:
+                        print(f"Error getting tracks from playlist {playlist['name']}: {e}")
+                        break
+                
+                print(f"Added {playlist_track_count} tracks from '{playlist['name']}'")
+            
+            print("Fetching recently played tracks...")
             try:
-                playlists = sp.current_user_playlists(limit=20)
-                for playlist in playlists['items']:
-                    if playlist['owner']['id'] == sp.me()['id']:
-                        try:
-                            tracks = sp.playlist_tracks(playlist['id'], limit=30)
-                            for item in tracks['items']:
-                                if item['track'] and item['track']['id']:
-                                    all_tracks.append(item['track'])
-                        except Exception as e:
-                            print(f"Error getting tracks from playlist {playlist['name']}: {e}")
-                print(f"Added tracks from {len(playlists['items'])} playlists")
+                recent_tracks = sp.current_user_recently_played(limit=50)
+                for item in recent_tracks['items']:
+                    if item['track'] and item['track']['id']:
+                        all_tracks.append(item['track'])
+                print(f"Added {len(recent_tracks['items'])} recently played tracks")
             except Exception as e:
-                print(f"Error getting playlists: {e}")
-
+                print(f"Error getting recently played tracks: {e}")
+            
+            print("Removing duplicates...")
             unique_tracks = []
             seen_ids = set()
             
@@ -84,6 +161,7 @@ class RecommendationEngine:
                     seen_ids.add(track['id'])
                     unique_tracks.append(track)
             
+            print(f"Total tracks before deduplication: {len(all_tracks)}")
             print(f"Total unique tracks collected: {len(unique_tracks)}")
             
             random.shuffle(unique_tracks)
@@ -102,7 +180,6 @@ class RecommendationEngine:
             if not all_tracks:
                 return {"error": "No tracks found for user profile"}
             
-            # Create a more realistic profile based on track data
             avg_features = {
                 'danceability': round(random.uniform(0.5, 0.8), 3),
                 'energy': round(random.uniform(0.6, 0.9), 3),
