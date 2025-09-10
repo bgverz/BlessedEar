@@ -20,7 +20,6 @@ class RecommendationEngine:
     
     async def extract_audio_features(self, sp: spotipy.Spotify, track_ids: List[str]) -> pd.DataFrame:
         """Extract audio features for tracks - simplified fallback"""
-        # Since audio features API is returning 403, use fallback values
         data = []
         for track_id in track_ids:
             data.append({
@@ -45,17 +44,15 @@ class RecommendationEngine:
             print(f"Error getting top tracks: {e}")
             return []
     
-    async def get_user_all_tracks(self, sp: spotipy.Spotify, limit: int = 200):
+    async def get_user_all_tracks(self, sp: spotipy.Spotify, limit: int = 800):
         """Get tracks from user's library, playlists, and top tracks"""
         all_tracks = []
         
         try:
-            # Get top tracks from different time ranges
             for time_range in ['short_term', 'medium_term', 'long_term']:
                 top_tracks = await self.get_user_top_tracks(sp, time_range, 20)
                 all_tracks.extend(top_tracks)
             
-            # Get saved tracks
             try:
                 saved_tracks = sp.current_user_saved_tracks(limit=50)
                 for item in saved_tracks['items']:
@@ -64,7 +61,6 @@ class RecommendationEngine:
             except Exception as e:
                 print(f"Error getting saved tracks: {e}")
             
-            # Get tracks from user's playlists
             try:
                 playlists = sp.current_user_playlists(limit=20)
                 for playlist in playlists['items']:
@@ -79,8 +75,7 @@ class RecommendationEngine:
                 print(f"Added tracks from {len(playlists['items'])} playlists")
             except Exception as e:
                 print(f"Error getting playlists: {e}")
-            
-            # Remove duplicates
+
             unique_tracks = []
             seen_ids = set()
             
@@ -102,7 +97,7 @@ class RecommendationEngine:
         """Build user profile from listening history"""
         try:
             sp = await self.get_spotify_client(access_token)
-            all_tracks = await self.get_user_all_tracks(sp, limit=200)
+            all_tracks = await self.get_user_all_tracks(sp, limit=500)
             
             if not all_tracks:
                 return {"error": "No tracks found for user profile"}
@@ -145,6 +140,7 @@ class RecommendationEngine:
                             'name': track['name'],
                             'artists': [artist['name'] for artist in track['artists']],
                             'album': album['name'],
+                            'album_images': track.get('album', {}).get('images', []),
                             'preview_url': track.get('preview_url'),
                             'external_urls': track.get('external_urls', {}),
                             'similarity_score': round(random.uniform(0.85, 0.95), 2),
@@ -181,6 +177,7 @@ class RecommendationEngine:
                         'name': track['name'],
                         'artists': [artist['name'] for artist in track['artists']],
                         'album': album_info['name'],
+                        'album_images': track.get('album', {}).get('images', []),
                         'preview_url': track.get('preview_url'),
                         'external_urls': track.get('external_urls', {}),
                         'similarity_score': round(random.uniform(0.80, 0.90), 2),
@@ -231,18 +228,15 @@ class RecommendationEngine:
             
             print(f"Starting recommendation generation for user: {user_id}")
             
-            # Get user's music library
             all_user_tracks = await self.get_user_all_tracks(sp, limit=150)
             
             if not all_user_tracks:
                 print("No user tracks found, cannot generate recommendations")
                 return []
             
-            # Create sets for efficient lookup
             user_track_ids = {track['id'] for track in all_user_tracks}
             enhanced_recs = []
             
-            # Analyze user's listening patterns
             artist_frequency = defaultdict(int)
             album_frequency = defaultdict(int)
             
@@ -252,44 +246,36 @@ class RecommendationEngine:
                 if track.get('album', {}).get('id'):
                     album_frequency[track['album']['id']] += 1
             
-            # Get favorite artists (sorted by frequency)
             favorite_artists = sorted(artist_frequency.items(), key=lambda x: x[1], reverse=True)
             favorite_albums = sorted(album_frequency.items(), key=lambda x: x[1], reverse=True)
             
             print(f"Found {len(favorite_artists)} favorite artists")
             
-            # Strategy 1: Deep dive into favorite artists' catalogs
             print("Getting deep cuts from favorite artists...")
-            for artist_id, frequency in favorite_artists[:15]:  # Top 15 artists
+            for artist_id, frequency in favorite_artists[:15]:
                 if len(enhanced_recs) >= limit:
                     break
                     
-                # Get more tracks from this artist
                 artist_tracks = await self.get_artist_similar_tracks(sp, artist_id, 8)
                 
-                # Filter out tracks user already has
                 new_tracks = [t for t in artist_tracks if t['id'] not in user_track_ids]
                 
-                # Add some variety by not taking all tracks from one artist
                 selected_tracks = new_tracks[:3] if frequency > 3 else new_tracks[:2]
                 enhanced_recs.extend(selected_tracks)
                 
-                # Update user_track_ids to avoid duplicates in recommendations
                 for track in selected_tracks:
                     user_track_ids.add(track['id'])
             
             print(f"Found {len(enhanced_recs)} tracks from artist deep dives")
             
-            # Strategy 2: Album deep cuts from favorite albums
             if len(enhanced_recs) < limit:
                 print("Getting deep cuts from favorite albums...")
-                for album_id, frequency in favorite_albums[:10]:  # Top 10 albums
+                for album_id, frequency in favorite_albums[:10]:
                     if len(enhanced_recs) >= limit:
                         break
                         
                     album_tracks = await self.get_album_deep_cuts(sp, album_id, user_track_ids, 3)
                     
-                    # Add to recommendations
                     for track in album_tracks:
                         if len(enhanced_recs) >= limit:
                             break
@@ -299,7 +285,6 @@ class RecommendationEngine:
             
             print(f"Found {len(enhanced_recs)} total tracks after album deep cuts")
             
-            # Strategy 3: Popular tracks from known artists (that user might have missed)
             if len(enhanced_recs) < limit:
                 print("Getting popular tracks from known artists...")
                 for artist_id, frequency in favorite_artists[:20]:
@@ -317,26 +302,20 @@ class RecommendationEngine:
             
             print(f"Found {len(enhanced_recs)} total tracks after popular track discovery")
             
-            # Strategy 4: If still not enough, use collaborative filtering approach
-            # Find artists that appear in the same playlists or albums as user's favorites
             if len(enhanced_recs) < limit:
                 print("Using collaborative discovery...")
                 
-                # Sample some of user's recent favorite tracks
                 sample_tracks = random.sample(all_user_tracks, min(10, len(all_user_tracks)))
                 
                 for track in sample_tracks:
                     if len(enhanced_recs) >= limit:
                         break
                         
-                    # Get the album this track is from
                     album_id = track.get('album', {}).get('id')
                     if album_id:
-                        # Get other tracks from this album by different artists
                         try:
                             album_info = sp.album(album_id)
                             if album_info.get('album_type') == 'compilation':
-                                # This is a compilation - great for discovery!
                                 compilation_tracks = await self.get_album_deep_cuts(sp, album_id, user_track_ids, 4)
                                 
                                 for comp_track in compilation_tracks:
@@ -350,23 +329,20 @@ class RecommendationEngine:
                         except Exception as e:
                             continue
             
-            # Shuffle for variety but keep quality high
             random.shuffle(enhanced_recs)
             
-            # Ensure we have a good mix of recommendation reasons
             final_recs = []
             reason_counts = defaultdict(int)
             
             for track in enhanced_recs:
-                reason_type = track['recommendation_reason'].split(' ')[0]  # First word
-                if reason_counts[reason_type] < limit // 3:  # Limit each type
+                reason_type = track['recommendation_reason'].split(' ')[0]
+                if reason_counts[reason_type] < limit // 3:
                     final_recs.append(track)
                     reason_counts[reason_type] += 1
                     
                 if len(final_recs) >= limit:
                     break
             
-            # Fill remaining spots if needed
             remaining_spots = limit - len(final_recs)
             if remaining_spots > 0:
                 remaining_tracks = [t for t in enhanced_recs if t not in final_recs]
@@ -388,7 +364,6 @@ class RecommendationEngine:
             if not all_user_tracks:
                 return []
             
-            # Enhanced mood matching with better keywords
             mood_keywords = {
                 'happy': ['love', 'happy', 'good', 'feel', 'dance', 'party', 'sun', 'bright', 'joy', 'smile', 'fun'],
                 'sad': ['sad', 'cry', 'alone', 'broken', 'hurt', 'miss', 'lost', 'tear', 'rain', 'blue', 'lonely'],
@@ -401,7 +376,6 @@ class RecommendationEngine:
             keywords = mood_keywords.get(mood, ['music'])
             mood_tracks = []
             
-            # Score tracks based on mood matching
             for track in all_user_tracks:
                 track_name = track['name'].lower()
                 artists = ' '.join([a['name'].lower() for a in track.get('artists', [])])
@@ -409,23 +383,18 @@ class RecommendationEngine:
                 
                 text_to_search = f"{track_name} {artists} {album_name}"
                 
-                # Count keyword matches
                 score = sum(1 for keyword in keywords if keyword in text_to_search)
                 
                 if score > 0:
                     mood_tracks.append((track, score))
             
-            # Sort by mood relevance
             mood_tracks.sort(key=lambda x: x[1], reverse=True)
             
-            # If we have mood-relevant tracks, use them
             if mood_tracks:
                 selected_tracks = [track for track, score in mood_tracks[:limit]]
             else:
-                # Fallback: use random selection from user's library
                 selected_tracks = random.sample(all_user_tracks, min(limit, len(all_user_tracks)))
             
-            # Convert to recommendation format
             enhanced_recs = []
             for track in selected_tracks:
                 enhanced_recs.append({
@@ -439,13 +408,11 @@ class RecommendationEngine:
                     'recommendation_reason': f'Perfect for {mood} mood'
                 })
             
-            # If we still need more tracks, get some from artists of the mood tracks
             if len(enhanced_recs) < limit:
                 user_track_ids = {track['id'] for track in selected_tracks}
                 remaining_needed = limit - len(enhanced_recs)
                 
-                # Get more tracks from artists that fit the mood
-                for track in selected_tracks[:5]:  # Use top 5 mood-matching tracks
+                for track in selected_tracks[:5]: 
                     if len(enhanced_recs) >= limit:
                         break
                         

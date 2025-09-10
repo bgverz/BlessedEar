@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useState, useEffect } from 'react';
-import { Music, BarChart3, Sparkles, User, PlayCircle, Heart, TrendingUp, Loader2, Clock, Star } from 'lucide-react';
+import { Music, BarChart3, Sparkles, User, PlayCircle, Heart, TrendingUp, Loader2, Clock, Star, ExternalLink } from 'lucide-react';
 
 const API_BASE = 'http://localhost:8000';
 
@@ -27,6 +27,9 @@ interface RecommendationTrack {
   recommendation_reason: string;
   similarity_score: number;
   preview_url?: string;
+  album?: string;
+  album_images?: Array<{url: string; width: number; height: number}>;
+  external_urls?: {spotify?: string};
 }
 
 interface TopTrack {
