@@ -265,3 +265,97 @@ async def get_available_genres(current_user: dict = Depends(get_current_user)):
         return {"genres": genres}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting genres: {str(e)}")
+    
+@router.get("/debug/user-cache")
+async def debug_user_cache(current_user: dict = Depends(get_current_user)):
+    """Debug endpoint to check user cache"""
+    return {
+        "user_data": current_user,
+        "cache_check": "Cache is working if you see this"
+    }
+
+@router.get("/debug/spotify-test")
+async def test_spotify_api(current_user: dict = Depends(get_current_user)):
+    """Test basic Spotify API access"""
+    try:
+        spotify_tokens = current_user.get("spotify_tokens", {})
+        access_token = spotify_tokens.get("access_token")
+        
+        if not access_token:
+            raise HTTPException(status_code=401, detail="No access token")
+        
+        sp = spotipy.Spotify(auth=access_token)
+        
+        # Test basic API call
+        user_info = sp.me()
+        
+        # Test recommendation with simple parameters
+        try:
+            recs = sp.recommendations(seed_genres=['pop'], limit=5, market='US')
+            return {
+                "user_info": user_info['display_name'],
+                "recommendations_count": len(recs['tracks']),
+                "first_track": recs['tracks'][0]['name'] if recs['tracks'] else None
+            }
+        except Exception as rec_error:
+            return {
+                "user_info": user_info['display_name'],
+                "recommendation_error": str(rec_error)
+            }
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Spotify API test failed: {str(e)}")
+    
+@router.get("/debug/spotify-test")
+async def test_spotify_api(current_user: dict = Depends(get_current_user)):
+    """Test what Spotify API calls actually work"""
+    try:
+        spotify_tokens = current_user.get("spotify_tokens", {})
+        access_token = spotify_tokens.get("access_token")
+        
+        if not access_token:
+            return {"error": "No access token"}
+        
+        sp = spotipy.Spotify(auth=access_token)
+        
+        tests = {}
+        
+        # Test 1: Basic user info
+        try:
+            user = sp.me()
+            tests["user_info"] = f"✅ User: {user['display_name']}"
+        except Exception as e:
+            tests["user_info"] = f"❌ User info failed: {e}"
+        
+        # Test 2: Genre seeds
+        try:
+            genres = sp.recommendation_genre_seeds()
+            tests["genre_seeds"] = f"✅ Found {len(genres['genres'])} genres"
+        except Exception as e:
+            tests["genre_seeds"] = f"❌ Genre seeds failed: {e}"
+        
+        # Test 3: Simple recommendation
+        try:
+            recs = sp.recommendations(seed_genres=['pop'], limit=1)
+            tests["simple_rec"] = f"✅ Simple rec: {recs['tracks'][0]['name']}"
+        except Exception as e:
+            tests["simple_rec"] = f"❌ Simple rec failed: {e}"
+        
+        # Test 4: Recommendation with market
+        try:
+            recs = sp.recommendations(seed_genres=['pop'], limit=1, market='US')
+            tests["market_rec"] = f"✅ Market rec: {recs['tracks'][0]['name']}"
+        except Exception as e:
+            tests["market_rec"] = f"❌ Market rec failed: {e}"
+        
+        # Test 5: Top tracks
+        try:
+            top = sp.current_user_top_tracks(limit=1)
+            tests["top_tracks"] = f"✅ Top track: {top['items'][0]['name']}"
+        except Exception as e:
+            tests["top_tracks"] = f"❌ Top tracks failed: {e}"
+        
+        return tests
+        
+    except Exception as e:
+        return {"error": f"General test failed: {e}"}
