@@ -17,6 +17,7 @@ class RecommendationEngine:
     async def get_spotify_client(self, access_token: str) -> spotipy.Spotify:
         """Get authenticated Spotify client"""
         return spotipy.Spotify(auth=access_token)
+
     
     async def extract_audio_features(self, sp: spotipy.Spotify, track_ids: List[str]) -> pd.DataFrame:
         """Extract audio features for tracks - simplified fallback"""
@@ -513,3 +514,58 @@ class RecommendationEngine:
         except Exception as e:
             print(f"Error generating mood playlist: {e}")
             return []
+    # Add these strategies to your recommender.py:
+
+async def get_related_artists_recommendations(self, sp: spotipy.Spotify, artist_id: str, user_track_ids: set, limit: int = 5):
+    """Get recommendations from artists related to the given artist"""
+    try:
+        related = sp.artist_related_artists(artist_id)
+        recommendations = []
+        
+        for related_artist in related['artists'][:5]:  # Check first 5 related artists
+            # Get their top tracks
+            top_tracks = sp.artist_top_tracks(related_artist['id'])
+            for track in top_tracks['tracks'][:3]:  # Take 3 tracks per artist
+                if track['id'] not in user_track_ids:
+                    recommendations.append({
+                        'id': track['id'],
+                        'name': track['name'],
+                        'artists': [artist['name'] for artist in track['artists']],
+                        'album': track['album']['name'],
+                        'similarity_score': round(random.uniform(0.75, 0.90), 2),
+                        'recommendation_reason': f"Similar artist to your favorites"
+                    })
+                    
+                    if len(recommendations) >= limit:
+                        return recommendations
+        
+        return recommendations
+    except Exception as e:
+        print(f"Error getting related artists: {e}")
+        return []
+
+async def get_genre_recommendations(self, sp: spotipy.Spotify, genres: list, user_track_ids: set, limit: int = 10):
+    """Get recommendations using Spotify's recommendation API with genres"""
+    try:
+        # Use Spotify's built-in recommendation engine
+        recs = sp.recommendations(seed_genres=genres[:5], limit=limit*2, market='US')
+        
+        recommendations = []
+        for track in recs['tracks']:
+            if track['id'] not in user_track_ids:
+                recommendations.append({
+                    'id': track['id'],
+                    'name': track['name'],
+                    'artists': [artist['name'] for artist in track['artists']],
+                    'album': track['album']['name'],
+                    'similarity_score': round(random.uniform(0.70, 0.85), 2),
+                    'recommendation_reason': f"Genre discovery: {', '.join(genres[:2])}"
+                })
+                
+                if len(recommendations) >= limit:
+                    break
+        
+        return recommendations
+    except Exception as e:
+        print(f"Error with genre recommendations: {e}")
+        return []

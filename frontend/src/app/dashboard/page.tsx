@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useState, useEffect } from 'react';
-import { Music, BarChart3, Sparkles, User, PlayCircle, Heart, TrendingUp, Loader2, Clock, Star, ExternalLink } from 'lucide-react';
+import { Music, BarChart3, Sparkles, PlayCircle, Heart, TrendingUp, Loader2, Clock, Star, ExternalLink, Trash2, Plus, Download, Calendar, Hash, Save } from 'lucide-react';
 
 const API_BASE = 'http://localhost:8000';
 
@@ -39,6 +39,18 @@ interface TopTrack {
   album: { name: string };
   popularity: number;
   preview_url?: string;
+}
+
+interface SavedPlaylist {
+  id: number;
+  name: string;
+  description?: string;
+  track_count: number;
+  mood?: string;
+  generation_type: string;
+  is_exported: boolean;
+  spotify_playlist_id?: string;
+  created_at: string;
 }
 
 async function getCurrentUser(token: string) {
@@ -96,7 +108,6 @@ const Sidebar = ({ activeTab, setActiveTab, userDisplayName }) => {
     { id: 'discover', label: 'Discover', icon: Sparkles },
     { id: 'playlists', label: 'Playlists', icon: Music },
     { id: 'analytics', label: 'Analytics', icon: TrendingUp },
-    { id: 'profile', label: 'Profile', icon: User },
   ];
 
   return (
@@ -208,7 +219,11 @@ const AudioFeatureRadar = ({ userProfile }: { userProfile: UserProfile | null })
   );
 };
 
-const RecommendationCard = ({ track }: { track: RecommendationTrack }) => (
+const RecommendationCard = ({ track, showSaveButton = false, onSave }: { 
+  track: RecommendationTrack; 
+  showSaveButton?: boolean;
+  onSave?: () => void;
+}) => (
   <div className="backdrop-blur-sm bg-white/5 border border-white/10 rounded-xl p-4 hover:bg-white/10 transition-all duration-200 cursor-pointer group">
     <div className="flex items-center gap-3">
       <div className="w-12 h-12 bg-gradient-to-br from-green-500/20 to-green-400/20 rounded-lg flex items-center justify-center group-hover:from-green-500/30 group-hover:to-green-400/30 transition-all duration-200">
@@ -220,6 +235,15 @@ const RecommendationCard = ({ track }: { track: RecommendationTrack }) => (
         <p className="text-xs text-green-400">{track.recommendation_reason}</p>
       </div>
       <div className="flex items-center gap-2">
+        {showSaveButton && onSave && (
+          <button 
+            onClick={onSave}
+            className="w-8 h-8 rounded-full bg-blue-500/20 flex items-center justify-center hover:bg-blue-500/30 transition-colors"
+            title="Save to playlists"
+          >
+            <Save className="w-4 h-4 text-blue-400" />
+          </button>
+        )}
         <button className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center hover:bg-green-500/20 transition-colors">
           <Heart className="w-4 h-4 text-gray-300" />
         </button>
@@ -238,13 +262,15 @@ const DashboardContent = ({
   recommendations, 
   isLoading, 
   onGenerateRecommendations,
-  onGenerateMoodPlaylist 
+  onGenerateMoodPlaylist,
+  onSavePlaylist
 }: {
   userProfile: UserProfile | null;
   recommendations: RecommendationTrack[];
   isLoading: boolean;
   onGenerateRecommendations: () => void;
   onGenerateMoodPlaylist: (mood: string) => void;
+  onSavePlaylist: () => void;
 }) => {
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -309,7 +335,18 @@ const DashboardContent = ({
 
       {/* Recommendations */}
       <GlassCard className="lg:col-span-2">
-        <h3 className="text-lg font-semibold text-white mb-4">AI Recommendations</h3>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-semibold text-white">AI Recommendations</h3>
+          {recommendations.length > 0 && (
+            <button 
+              onClick={onSavePlaylist}
+              className="bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 transition-colors flex items-center gap-2"
+            >
+              <Save className="w-4 h-4" />
+              Save Playlist
+            </button>
+          )}
+        </div>
         {isLoading ? (
           <div className="flex items-center justify-center h-32">
             <Loader2 className="w-8 h-8 animate-spin text-green-500" />
@@ -370,7 +407,7 @@ const DashboardContent = ({
   );
 };
 
-// NEW DISCOVER TAB COMPONENT
+// DISCOVER TAB COMPONENT
 const DiscoverTab = ({ token }: { token: string }) => {
   const [discoverType, setDiscoverType] = useState('similar');
   const [isLoading, setIsLoading] = useState(false);
@@ -507,7 +544,7 @@ const DiscoverTab = ({ token }: { token: string }) => {
   );
 };
 
-// NEW ANALYTICS TAB COMPONENT
+// ANALYTICS TAB COMPONENT
 const AnalyticsTab = ({ token, userProfile }: { token: string; userProfile: UserProfile | null }) => {
   const [timeRange, setTimeRange] = useState('medium_term');
   const [topTracks, setTopTracks] = useState<TopTrack[]>([]);
@@ -692,6 +729,344 @@ const AnalyticsTab = ({ token, userProfile }: { token: string; userProfile: User
   );
 };
 
+// PLAYLISTS TAB COMPONENT
+const PlaylistsTab = ({ token }: { token: string }) => {
+  const [playlists, setPlaylists] = useState<SavedPlaylist[]>([]);
+  const [selectedPlaylist, setSelectedPlaylist] = useState<any>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [showExportModal, setShowExportModal] = useState<number | null>(null);
+  const [exportName, setExportName] = useState('');
+  const [exportDescription, setExportDescription] = useState('');
+
+  useEffect(() => {
+    if (token) {
+      loadPlaylists();
+    }
+  }, [token]);
+
+  const loadPlaylists = async () => {
+    setIsLoading(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/playlists/my-playlists`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      const data = await response.json();
+      setPlaylists(data || []);
+    } catch (error) {
+      console.error('Error loading playlists:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const loadPlaylistDetails = async (playlistId: number) => {
+    try {
+      const response = await fetch(`${API_BASE}/api/playlists/${playlistId}`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      const data = await response.json();
+      setSelectedPlaylist(data);
+    } catch (error) {
+      console.error('Error loading playlist details:', error);
+    }
+  };
+
+  const deletePlaylist = async (playlistId: number) => {
+    if (!confirm('Are you sure you want to delete this playlist?')) return;
+
+    try {
+      await fetch(`${API_BASE}/api/playlists/${playlistId}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      
+      loadPlaylists();
+      
+      if (selectedPlaylist?.id === playlistId) {
+        setSelectedPlaylist(null);
+      }
+    } catch (error) {
+      console.error('Error deleting playlist:', error);
+      alert('Failed to delete playlist');
+    }
+  };
+
+  const exportToSpotify = async (playlistId: number) => {
+    try {
+      const response = await fetch(`${API_BASE}/api/playlists/${playlistId}/export-to-spotify`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          playlist_id: playlistId,
+          spotify_name: exportName,
+          spotify_description: exportDescription,
+        }),
+      });
+
+      const data = await response.json();
+      
+      if (response.ok) {
+        alert(`Playlist exported to Spotify successfully! ${data.track_count} tracks added.`);
+        loadPlaylists();
+        setShowExportModal(null);
+        setExportName('');
+        setExportDescription('');
+      } else {
+        alert(`Export failed: ${data.detail}`);
+      }
+    } catch (error) {
+      console.error('Error exporting to Spotify:', error);
+      alert('Failed to export playlist to Spotify');
+    }
+  };
+
+  const formatDate = (dateString: string) => {
+    return new Date(dateString).toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  };
+
+  const getMoodColor = (mood?: string) => {
+    const colors = {
+      happy: 'from-yellow-500 to-orange-500',
+      energetic: 'from-red-500 to-pink-500',
+      chill: 'from-blue-500 to-cyan-500',
+      focus: 'from-purple-500 to-indigo-500',
+      sad: 'from-gray-500 to-blue-500',
+      party: 'from-green-500 to-emerald-500',
+    };
+    return colors[mood as keyof typeof colors] || 'from-gray-500 to-gray-600';
+  };
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-2xl font-bold text-white mb-2">Your Playlists</h2>
+        <p className="text-gray-300">Manage your saved AI-generated playlists and export them to Spotify</p>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Playlists List */}
+        <GlassCard>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-semibold text-white">Saved Playlists</h3>
+            <span className="text-sm text-gray-400">{playlists.length} total</span>
+          </div>
+
+          {isLoading ? (
+            <div className="text-center py-8">
+              <Loader2 className="w-8 h-8 animate-spin text-green-500 mx-auto" />
+            </div>
+          ) : playlists.length > 0 ? (
+            <div className="space-y-3 max-h-96 overflow-y-auto">
+              {playlists.map((playlist) => (
+                <div
+                  key={playlist.id}
+                  className={`p-4 rounded-xl border-2 transition-all duration-200 cursor-pointer ${
+                    selectedPlaylist?.id === playlist.id
+                      ? 'border-green-500 bg-green-500/10'
+                      : 'border-white/20 hover:border-white/40 hover:bg-white/5'
+                  }`}
+                  onClick={() => loadPlaylistDetails(playlist.id)}
+                >
+                  <div className="flex items-start justify-between">
+                    <div className="flex-1 min-w-0">
+                      <h4 className="font-medium text-white truncate">{playlist.name}</h4>
+                      <div className="flex items-center gap-2 mt-1">
+                        <Hash className="w-3 h-3 text-gray-400" />
+                        <span className="text-xs text-gray-400">{playlist.track_count} tracks</span>
+                        {playlist.mood && (
+                          <>
+                            <span className="text-gray-500">•</span>
+                            <span className={`text-xs px-2 py-1 rounded-full bg-gradient-to-r ${getMoodColor(playlist.mood)} text-white`}>
+                              {playlist.mood}
+                            </span>
+                          </>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-1 mt-1">
+                        <Calendar className="w-3 h-3 text-gray-400" />
+                        <span className="text-xs text-gray-400">{formatDate(playlist.created_at)}</span>
+                        {playlist.is_exported && (
+                          <span className="ml-2 text-xs px-2 py-1 bg-green-500/20 text-green-400 rounded-full">
+                            Exported
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    
+                    <div className="flex items-center gap-2 ml-2">
+                      {!playlist.is_exported && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setExportName(playlist.name);
+                            setExportDescription(playlist.description || '');
+                            setShowExportModal(playlist.id);
+                          }}
+                          className="w-8 h-8 rounded-full bg-green-500/20 flex items-center justify-center hover:bg-green-500/30 transition-colors"
+                          title="Export to Spotify"
+                        >
+                          <Download className="w-4 h-4 text-green-400" />
+                        </button>
+                      )}
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          deletePlaylist(playlist.id);
+                        }}
+                        className="w-8 h-8 rounded-full bg-red-500/20 flex items-center justify-center hover:bg-red-500/30 transition-colors"
+                        title="Delete playlist"
+                      >
+                        <Trash2 className="w-4 h-4 text-red-400" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-center py-8">
+              <Music className="w-12 h-12 text-gray-400 mx-auto mb-4" />
+              <p className="text-gray-400 mb-4">No saved playlists yet</p>
+              <p className="text-sm text-gray-500">Generate some recommendations and save them as playlists!</p>
+            </div>
+          )}
+        </GlassCard>
+
+        {/* Playlist Details */}
+        <GlassCard>
+          <h3 className="text-lg font-semibold text-white mb-4">Playlist Details</h3>
+          
+          {selectedPlaylist ? (
+            <div className="space-y-4">
+              <div>
+                <h4 className="text-xl font-bold text-white">{selectedPlaylist.name}</h4>
+                {selectedPlaylist.description && (
+                  <p className="text-gray-300 mt-1">{selectedPlaylist.description}</p>
+                )}
+                <div className="flex items-center gap-2 mt-2">
+                  <span className="text-sm text-gray-400">{selectedPlaylist.tracks?.length || 0} tracks</span>
+                  {selectedPlaylist.mood && (
+                    <>
+                      <span className="text-gray-500">•</span>
+                      <span className={`text-xs px-2 py-1 rounded-full bg-gradient-to-r ${getMoodColor(selectedPlaylist.mood)} text-white`}>
+                        {selectedPlaylist.mood} mood
+                      </span>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              <div className="space-y-2 max-h-64 overflow-y-auto">
+                {selectedPlaylist.tracks?.map((track: any, index: number) => (
+                  <div key={track.id || index} className="flex items-center gap-3 p-2 bg-white/5 rounded-lg">
+                    <span className="text-xs text-gray-400 w-6">{index + 1}</span>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-white truncate">{track.name}</p>
+                      <p className="text-xs text-gray-400 truncate">{track.artists?.join(', ')}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {!selectedPlaylist.is_exported && (
+                <button
+                  onClick={() => {
+                    setExportName(selectedPlaylist.name);
+                    setExportDescription(selectedPlaylist.description || '');
+                    setShowExportModal(selectedPlaylist.id);
+                  }}
+                  className="w-full bg-green-500 text-white py-3 rounded-lg hover:bg-green-600 transition-colors flex items-center justify-center gap-2"
+                >
+                  <Download className="w-4 h-4" />
+                  Export to Spotify
+                </button>
+              )}
+
+              {selectedPlaylist.is_exported && selectedPlaylist.spotify_playlist_id && (
+                <a
+                  href={`https://open.spotify.com/playlist/${selectedPlaylist.spotify_playlist_id}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="w-full bg-green-500/20 border border-green-500/30 text-green-400 py-3 rounded-lg hover:bg-green-500/30 transition-colors flex items-center justify-center gap-2"
+                >
+                  <ExternalLink className="w-4 h-4" />
+                  Open in Spotify
+                </a>
+              )}
+            </div>
+          ) : (
+            <div className="text-center py-8">
+              <p className="text-gray-400">Select a playlist to view details</p>
+            </div>
+          )}
+        </GlassCard>
+      </div>
+
+      {/* Export Modal */}
+      {showExportModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-gray-800 p-6 rounded-2xl max-w-md w-full mx-4">
+            <h3 className="text-lg font-semibold text-white mb-4">Export to Spotify</h3>
+            
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm text-gray-300 mb-2">Playlist Name</label>
+                <input
+                  type="text"
+                  value={exportName}
+                  onChange={(e) => setExportName(e.target.value)}
+                  className="w-full bg-gray-700 text-white rounded-lg px-3 py-2 border border-gray-600 focus:border-green-500 focus:outline-none"
+                  placeholder="Enter playlist name"
+                />
+              </div>
+              
+              <div>
+                <label className="block text-sm text-gray-300 mb-2">Description (Optional)</label>
+                <textarea
+                  value={exportDescription}
+                  onChange={(e) => setExportDescription(e.target.value)}
+                  className="w-full bg-gray-700 text-white rounded-lg px-3 py-2 border border-gray-600 focus:border-green-500 focus:outline-none"
+                  placeholder="Enter description"
+                  rows={3}
+                />
+              </div>
+            </div>
+
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={() => {
+                  setShowExportModal(null);
+                  setExportName('');
+                  setExportDescription('');
+                }}
+                className="flex-1 bg-gray-600 text-white py-2 rounded-lg hover:bg-gray-500 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => exportToSpotify(showExportModal)}
+                disabled={!exportName.trim()}
+                className="flex-1 bg-green-500 text-white py-2 rounded-lg hover:bg-green-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Export
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 export default function DashboardLayout() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
@@ -699,6 +1074,10 @@ export default function DashboardLayout() {
   const [recommendations, setRecommendations] = useState<RecommendationTrack[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [token, setToken] = useState<string | null>(null);
+  const [showSaveModal, setShowSaveModal] = useState(false);
+  const [playlistName, setPlaylistName] = useState('');
+  const [playlistDescription, setPlaylistDescription] = useState('');
+  const [currentMood, setCurrentMood] = useState<string | null>(null);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -758,6 +1137,7 @@ export default function DashboardLayout() {
     if (!token) return;
     
     setIsLoading(true);
+    setCurrentMood(null);
     try {
       const recs = await generateRecommendations(token, { limit: 8 });
       setRecommendations(recs);
@@ -772,6 +1152,7 @@ export default function DashboardLayout() {
     if (!token) return;
     
     setIsLoading(true);
+    setCurrentMood(mood);
     try {
       const recs = await generateMoodPlaylist(token, mood);
       setRecommendations(recs);
@@ -782,28 +1163,46 @@ export default function DashboardLayout() {
     }
   };
 
-  const handleLogout = async () => {
+  const handleSavePlaylist = async () => {
+    if (!token || recommendations.length === 0) return;
+
     try {
-      setToken(null);
-      setUserProfile(null);
-      setCurrentUser(null);
-      setRecommendations([]);
-      
-      localStorage.clear();
-      sessionStorage.clear();
-      
-      if (token) {
-        await fetch(`${API_BASE}/api/auth/logout`, {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${token}` },
-        });
+      const response = await fetch(`${API_BASE}/api/playlists/save`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          name: playlistName,
+          description: playlistDescription,
+          tracks: recommendations,
+          mood: currentMood,
+          generation_type: currentMood ? 'mood' : 'recommendation',
+        }),
+      });
+
+      if (response.ok) {
+        alert('Playlist saved successfully!');
+        setShowSaveModal(false);
+        setPlaylistName('');
+        setPlaylistDescription('');
+      } else {
+        const error = await response.json();
+        alert(`Failed to save playlist: ${error.detail}`);
       }
-      
-      window.location.href = '/login?force=true';
     } catch (error) {
-      console.error('Error logging out:', error);
-      window.location.href = '/login?force=true';
+      console.error('Error saving playlist:', error);
+      alert('Failed to save playlist');
     }
+  };
+
+  const openSaveModal = () => {
+    const defaultName = currentMood 
+      ? `${currentMood.charAt(0).toUpperCase() + currentMood.slice(1)} Vibes`
+      : `AI Recommendations ${new Date().toLocaleDateString()}`;
+    setPlaylistName(defaultName);
+    setShowSaveModal(true);
   };
 
   if (!token) {
@@ -837,24 +1236,71 @@ export default function DashboardLayout() {
               isLoading={isLoading}
               onGenerateRecommendations={handleGenerateRecommendations}
               onGenerateMoodPlaylist={handleGenerateMoodPlaylist}
+              onSavePlaylist={openSaveModal}
             />
           )}
           {activeTab === 'discover' && <DiscoverTab token={token} />}
           {activeTab === 'analytics' && <AnalyticsTab token={token} userProfile={userProfile} />}
-          {activeTab === 'playlists' && (
-            <GlassCard>
-              <h2 className="text-2xl font-bold text-white mb-4">Your Playlists</h2>
-              <p className="text-gray-300">Playlist management coming soon...</p>
-            </GlassCard>
-          )}
-          {activeTab === 'profile' && (
-            <GlassCard>
-              <h2 className="text-2xl font-bold text-white mb-4">Profile Settings</h2>
-              <p className="text-gray-300">User profile management coming soon...</p>
-            </GlassCard>
-          )}
+          {activeTab === 'playlists' && <PlaylistsTab token={token} />}
         </div>
       </main>
+
+      {/* Save Playlist Modal */}
+      {showSaveModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-gray-800 p-6 rounded-2xl max-w-md w-full mx-4">
+            <h3 className="text-lg font-semibold text-white mb-4">Save Playlist</h3>
+            
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm text-gray-300 mb-2">Playlist Name</label>
+                <input
+                  type="text"
+                  value={playlistName}
+                  onChange={(e) => setPlaylistName(e.target.value)}
+                  className="w-full bg-gray-700 text-white rounded-lg px-3 py-2 border border-gray-600 focus:border-green-500 focus:outline-none"
+                  placeholder="Enter playlist name"
+                />
+              </div>
+              
+              <div>
+                <label className="block text-sm text-gray-300 mb-2">Description (Optional)</label>
+                <textarea
+                  value={playlistDescription}
+                  onChange={(e) => setPlaylistDescription(e.target.value)}
+                  className="w-full bg-gray-700 text-white rounded-lg px-3 py-2 border border-gray-600 focus:border-green-500 focus:outline-none"
+                  placeholder="Enter description"
+                  rows={3}
+                />
+              </div>
+
+              <div className="text-sm text-gray-400">
+                {recommendations.length} tracks • {currentMood ? `${currentMood} mood` : 'AI recommendations'}
+              </div>
+            </div>
+
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={() => {
+                  setShowSaveModal(false);
+                  setPlaylistName('');
+                  setPlaylistDescription('');
+                }}
+                className="flex-1 bg-gray-600 text-white py-2 rounded-lg hover:bg-gray-500 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSavePlaylist}
+                disabled={!playlistName.trim()}
+                className="flex-1 bg-green-500 text-white py-2 rounded-lg hover:bg-green-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
