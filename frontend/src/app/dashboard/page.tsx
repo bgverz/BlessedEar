@@ -118,20 +118,46 @@ const Sidebar = ({ activeTab, setActiveTab, userDisplayName }) => {
         </div>
         <h1 className="text-xl font-bold text-white">BlessedEar</h1>
       </div>
-      
+
       {userDisplayName && (
         <div className="mb-6 p-3 bg-white/5 rounded-lg">
           <p className="text-sm text-gray-400">Welcome back,</p>
           <p className="text-white font-semibold">{userDisplayName}</p>
-          <button 
-            onClick={() => window.location.href = '/login'}
+          <button
+            onClick={async () => {
+              const t = sessionStorage.getItem('access_token');
+
+              // 1. Wipe ALL client-side auth state immediately so no stale
+              //    JWT can be reused after this point.
+              sessionStorage.removeItem('access_token');
+
+              if (t) {
+                try {
+                  // 2. Call /switch: clears server-side caches AND returns a
+                  //    fresh Spotify auth URL with show_dialog=true + new state.
+                  const res = await fetch(`${API_BASE}/api/auth/switch`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${t}` },
+                  });
+                  const data = await res.json();
+                  if (data.auth_url) {
+                    // 3. Hard-redirect straight to Spotify — no stale SPA state.
+                    window.location.href = data.auth_url;
+                    return;
+                  }
+                } catch (_) { /* fall through to login page */ }
+              }
+
+              // Fallback: go to login page if /switch fails or no token existed.
+              window.location.href = '/login';
+            }}
             className="mt-2 w-full text-xs text-gray-400 hover:text-white py-1 px-2 rounded border border-gray-600 hover:border-gray-400 transition-colors"
           >
             Switch Account
           </button>
         </div>
       )}
-      
+
       <nav className="space-y-2">
         {tabs.map((tab) => {
           const Icon = tab.icon;
@@ -140,8 +166,8 @@ const Sidebar = ({ activeTab, setActiveTab, userDisplayName }) => {
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
               className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 ${
-                activeTab === tab.id 
-                  ? 'bg-green-500 text-white shadow-lg shadow-green-500/25' 
+                activeTab === tab.id
+                  ? 'bg-green-500 text-white shadow-lg shadow-green-500/25'
                   : 'text-gray-300 hover:bg-white/10 hover:text-white'
               }`}
             >
@@ -185,12 +211,12 @@ const AudioFeatureRadar = ({ userProfile }: { userProfile: UserProfile | null })
             const angle = (index * 60) - 90;
             const x = Math.cos(angle * Math.PI / 180) * (60 + feature.value * 20);
             const y = Math.sin(angle * Math.PI / 180) * (60 + feature.value * 20);
-            
+
             return (
               <div
                 key={feature.name}
                 className="absolute w-3 h-3 rounded-full"
-                style={{ 
+                style={{
                   backgroundColor: feature.color,
                   left: `calc(50% + ${x}px - 6px)`,
                   top: `calc(50% + ${y}px - 6px)`,
@@ -207,8 +233,8 @@ const AudioFeatureRadar = ({ userProfile }: { userProfile: UserProfile | null })
       <div className="flex flex-wrap gap-2 mt-4">
         {features.map((feature) => (
           <div key={feature.name} className="flex items-center gap-1">
-            <div 
-              className="w-2 h-2 rounded-full" 
+            <div
+              className="w-2 h-2 rounded-full"
               style={{ backgroundColor: feature.color }}
             />
             <span className="text-xs text-gray-300">{feature.name}</span>
@@ -219,8 +245,8 @@ const AudioFeatureRadar = ({ userProfile }: { userProfile: UserProfile | null })
   );
 };
 
-const RecommendationCard = ({ track, showSaveButton = false, onSave }: { 
-  track: RecommendationTrack; 
+const RecommendationCard = ({ track, showSaveButton = false, onSave }: {
+  track: RecommendationTrack;
   showSaveButton?: boolean;
   onSave?: () => void;
 }) => (
@@ -236,7 +262,7 @@ const RecommendationCard = ({ track, showSaveButton = false, onSave }: {
       </div>
       <div className="flex items-center gap-2">
         {showSaveButton && onSave && (
-          <button 
+          <button
             onClick={onSave}
             className="w-8 h-8 rounded-full bg-blue-500/20 flex items-center justify-center hover:bg-blue-500/30 transition-colors"
             title="Save to playlists"
@@ -257,10 +283,10 @@ const RecommendationCard = ({ track, showSaveButton = false, onSave }: {
   </div>
 );
 
-const DashboardContent = ({ 
-  userProfile, 
-  recommendations, 
-  isLoading, 
+const DashboardContent = ({
+  userProfile,
+  recommendations,
+  isLoading,
   onGenerateRecommendations,
   onGenerateMoodPlaylist,
   onSavePlaylist
@@ -283,7 +309,7 @@ const DashboardContent = ({
             </h2>
             <p className="text-gray-300">AI-powered insights from your music library</p>
           </div>
-          <button 
+          <button
             onClick={onGenerateRecommendations}
             disabled={isLoading}
             className="bg-gradient-to-r from-green-500 to-green-400 text-white px-6 py-3 rounded-xl font-medium shadow-lg hover:shadow-xl transition-all duration-200 hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
@@ -292,7 +318,7 @@ const DashboardContent = ({
             Generate Playlist
           </button>
         </div>
-        
+
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <div className="bg-gradient-to-br from-blue-500/20 to-purple-500/20 rounded-xl p-4 border border-white/10">
             <div className="flex items-center gap-3 mb-2">
@@ -304,7 +330,7 @@ const DashboardContent = ({
             </p>
             <p className="text-xs text-gray-400">From your Spotify library</p>
           </div>
-          
+
           <div className="bg-gradient-to-br from-green-500/20 to-emerald-500/20 rounded-xl p-4 border border-white/10">
             <div className="flex items-center gap-3 mb-2">
               <Music className="w-5 h-5 text-green-400" />
@@ -313,14 +339,14 @@ const DashboardContent = ({
             <p className="text-2xl font-bold text-white">{recommendations.length}</p>
             <p className="text-xs text-gray-400">Generated for you</p>
           </div>
-          
+
           <div className="bg-gradient-to-br from-pink-500/20 to-rose-500/20 rounded-xl p-4 border border-white/10">
             <div className="flex items-center gap-3 mb-2">
               <Heart className="w-5 h-5 text-pink-400" />
               <span className="text-sm text-gray-300">Similarity Score</span>
             </div>
             <p className="text-2xl font-bold text-white">
-              {recommendations.length > 0 
+              {recommendations.length > 0
                 ? Math.round(recommendations[0]?.similarity_score * 100) || 'N/A'
                 : 'N/A'
               }%
@@ -338,7 +364,7 @@ const DashboardContent = ({
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-lg font-semibold text-white">AI Recommendations</h3>
           {recommendations.length > 0 && (
-            <button 
+            <button
               onClick={onSavePlaylist}
               className="bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 transition-colors flex items-center gap-2"
             >
@@ -360,7 +386,7 @@ const DashboardContent = ({
         ) : (
           <div className="text-center py-8">
             <p className="text-gray-400 mb-4">No recommendations yet</p>
-            <button 
+            <button
               onClick={onGenerateRecommendations}
               className="bg-green-500 text-white px-6 py-2 rounded-lg hover:bg-green-600 transition-colors"
             >
@@ -368,9 +394,9 @@ const DashboardContent = ({
             </button>
           </div>
         )}
-        
+
         {recommendations.length > 0 && (
-          <button 
+          <button
             onClick={onGenerateRecommendations}
             className="w-full mt-4 py-3 border border-white/20 rounded-xl text-gray-300 hover:bg-white/5 transition-all duration-200"
           >
@@ -383,19 +409,19 @@ const DashboardContent = ({
       <GlassCard>
         <h3 className="text-lg font-semibold text-white mb-4">Quick Actions</h3>
         <div className="space-y-3">
-          <button 
+          <button
             onClick={() => onGenerateMoodPlaylist('happy')}
             className="w-full bg-gradient-to-r from-purple-500/20 to-pink-500/20 border border-purple-500/30 text-white py-3 rounded-xl hover:from-purple-500/30 hover:to-pink-500/30 transition-all duration-200"
           >
             Happy Playlist
           </button>
-          <button 
+          <button
             onClick={() => onGenerateMoodPlaylist('chill')}
             className="w-full bg-gradient-to-r from-green-500/20 to-blue-500/20 border border-green-500/30 text-white py-3 rounded-xl hover:from-green-500/30 hover:to-blue-500/30 transition-all duration-200"
           >
             Chill Vibes
           </button>
-          <button 
+          <button
             onClick={() => onGenerateMoodPlaylist('energetic')}
             className="w-full bg-gradient-to-r from-orange-500/20 to-red-500/20 border border-orange-500/30 text-white py-3 rounded-xl hover:from-orange-500/30 hover:to-red-500/30 transition-all duration-200"
           >
@@ -508,7 +534,7 @@ const DiscoverTab = ({ token }: { token: string }) => {
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-lg font-semibold text-white">Discovered Tracks</h3>
           {recommendations.length > 0 && (
-            <button 
+            <button
               onClick={() => handleDiscoverMusic(discoverType)}
               className="text-sm text-green-400 hover:text-green-300 transition-colors"
             >
@@ -516,7 +542,7 @@ const DiscoverTab = ({ token }: { token: string }) => {
             </button>
           )}
         </div>
-        
+
         {isLoading ? (
           <div className="flex items-center justify-center h-32">
             <Loader2 className="w-8 h-8 animate-spin text-green-500" />
@@ -531,7 +557,7 @@ const DiscoverTab = ({ token }: { token: string }) => {
           <div className="text-center py-8">
             <Sparkles className="w-12 h-12 text-gray-400 mx-auto mb-4" />
             <p className="text-gray-400 mb-4">Choose a discovery mode to find new music</p>
-            <button 
+            <button
               onClick={() => handleDiscoverMusic('similar')}
               className="bg-green-500 text-white px-6 py-2 rounded-lg hover:bg-green-600 transition-colors"
             >
@@ -584,9 +610,9 @@ const AnalyticsTab = ({ token, userProfile }: { token: string; userProfile: User
         <span className="text-sm text-gray-400">{Math.round(value * 100)}%</span>
       </div>
       <div className="w-full bg-gray-700 rounded-full h-2">
-        <div 
+        <div
           className="h-2 rounded-full transition-all duration-500"
-          style={{ 
+          style={{
             width: `${value * 100}%`,
             backgroundColor: color,
             boxShadow: `0 0 10px ${color}40`
@@ -654,7 +680,7 @@ const AnalyticsTab = ({ token, userProfile }: { token: string; userProfile: User
                 </div>
               </div>
             </div>
-            
+
             <div className="bg-gradient-to-r from-green-500/20 to-emerald-500/20 rounded-lg p-4">
               <div className="flex items-center gap-3">
                 <TrendingUp className="w-6 h-6 text-green-400" />
@@ -779,9 +805,9 @@ const PlaylistsTab = ({ token }: { token: string }) => {
         method: 'DELETE',
         headers: { 'Authorization': `Bearer ${token}` },
       });
-      
+
       loadPlaylists();
-      
+
       if (selectedPlaylist?.id === playlistId) {
         setSelectedPlaylist(null);
       }
@@ -807,7 +833,7 @@ const PlaylistsTab = ({ token }: { token: string }) => {
       });
 
       const data = await response.json();
-      
+
       if (response.ok) {
         alert(`Playlist exported to Spotify successfully! ${data.track_count} tracks added.`);
         loadPlaylists();
@@ -901,7 +927,7 @@ const PlaylistsTab = ({ token }: { token: string }) => {
                         )}
                       </div>
                     </div>
-                    
+
                     <div className="flex items-center gap-2 ml-2">
                       {!playlist.is_exported && (
                         <button
@@ -944,7 +970,7 @@ const PlaylistsTab = ({ token }: { token: string }) => {
         {/* Playlist Details */}
         <GlassCard>
           <h3 className="text-lg font-semibold text-white mb-4">Playlist Details</h3>
-          
+
           {selectedPlaylist ? (
             <div className="space-y-4">
               <div>
@@ -1016,7 +1042,7 @@ const PlaylistsTab = ({ token }: { token: string }) => {
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-gray-800 p-6 rounded-2xl max-w-md w-full mx-4">
             <h3 className="text-lg font-semibold text-white mb-4">Export to Spotify</h3>
-            
+
             <div className="space-y-4">
               <div>
                 <label className="block text-sm text-gray-300 mb-2">Playlist Name</label>
@@ -1028,7 +1054,7 @@ const PlaylistsTab = ({ token }: { token: string }) => {
                   placeholder="Enter playlist name"
                 />
               </div>
-              
+
               <div>
                 <label className="block text-sm text-gray-300 mb-2">Description (Optional)</label>
                 <textarea
@@ -1081,25 +1107,44 @@ export default function DashboardLayout() {
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const urlToken = params.get('token');
+    const authCode = params.get('code');
     const isFresh = params.get('fresh');
-    
-    console.log('Token check:', urlToken ? 'Found' : 'Not found');
-    console.log('Fresh login:', isFresh ? 'Yes' : 'No');
-    
-    if (urlToken) {
-      setToken(urlToken);
-      
-      if (isFresh) {
-        console.log('Fresh login detected - clearing all cached data');
-        setUserProfile(null);
-        setCurrentUser(null);
-        setRecommendations([]);
-        localStorage.clear();
-        sessionStorage.clear();
-      }
-      
+
+    if (authCode) {
+      // A fresh OAuth redirect arrived — discard any stale JWT immediately so
+      // the old identity can never be used while the exchange is in flight.
+      sessionStorage.removeItem('access_token');
+
+      // Exchange the one-time server code for a JWT — the JWT itself never
+      // appears in the URL, preventing it from leaking into browser history or logs.
       window.history.replaceState({}, '', '/dashboard');
+
+      fetch(`${API_BASE}/api/auth/exchange?code=${authCode}`, { method: 'POST' })
+        .then((r) => r.json())
+        .then((data) => {
+          if (data.access_token) {
+            // Always clear React state before setting the new token so that
+            // stale profile/recommendations from a previous account cannot be
+            // displayed even briefly.
+            setUserProfile(null);
+            setCurrentUser(null);
+            setRecommendations([]);
+
+            sessionStorage.setItem('access_token', data.access_token);
+            setToken(data.access_token);
+          } else {
+            window.location.href = '/login';
+          }
+        })
+        .catch(() => {
+          window.location.href = '/login';
+        });
+    } else {
+      // Returning visit — restore from sessionStorage
+      const stored = sessionStorage.getItem('access_token');
+      if (stored) {
+        setToken(stored);
+      }
     }
   }, []);
 
@@ -1111,14 +1156,14 @@ export default function DashboardLayout() {
 
   const loadUserData = async () => {
     if (!token) return;
-    
+
     setIsLoading(true);
     try {
       const [profile, user] = await Promise.all([
         getUserProfile(token),
         getCurrentUser(token)
       ]);
-      
+
       setUserProfile(profile);
       setCurrentUser(user);
 
@@ -1135,7 +1180,7 @@ export default function DashboardLayout() {
 
   const handleGenerateRecommendations = async () => {
     if (!token) return;
-    
+
     setIsLoading(true);
     setCurrentMood(null);
     try {
@@ -1150,7 +1195,7 @@ export default function DashboardLayout() {
 
   const handleGenerateMoodPlaylist = async (mood: string) => {
     if (!token) return;
-    
+
     setIsLoading(true);
     setCurrentMood(mood);
     try {
@@ -1198,7 +1243,7 @@ export default function DashboardLayout() {
   };
 
   const openSaveModal = () => {
-    const defaultName = currentMood 
+    const defaultName = currentMood
       ? `${currentMood.charAt(0).toUpperCase() + currentMood.slice(1)} Vibes`
       : `AI Recommendations ${new Date().toLocaleDateString()}`;
     setPlaylistName(defaultName);
@@ -1221,16 +1266,16 @@ export default function DashboardLayout() {
         <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-blue-500/10 rounded-full blur-3xl animate-pulse"></div>
       </div>
 
-      <Sidebar 
-        activeTab={activeTab} 
-        setActiveTab={setActiveTab} 
+      <Sidebar
+        activeTab={activeTab}
+        setActiveTab={setActiveTab}
         userDisplayName={currentUser?.display_name}
       />
-      
+
       <main className="ml-64 p-8">
         <div>
           {activeTab === 'dashboard' && (
-            <DashboardContent 
+            <DashboardContent
               userProfile={userProfile}
               recommendations={recommendations}
               isLoading={isLoading}
@@ -1250,7 +1295,7 @@ export default function DashboardLayout() {
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-gray-800 p-6 rounded-2xl max-w-md w-full mx-4">
             <h3 className="text-lg font-semibold text-white mb-4">Save Playlist</h3>
-            
+
             <div className="space-y-4">
               <div>
                 <label className="block text-sm text-gray-300 mb-2">Playlist Name</label>
@@ -1262,7 +1307,7 @@ export default function DashboardLayout() {
                   placeholder="Enter playlist name"
                 />
               </div>
-              
+
               <div>
                 <label className="block text-sm text-gray-300 mb-2">Description (Optional)</label>
                 <textarea

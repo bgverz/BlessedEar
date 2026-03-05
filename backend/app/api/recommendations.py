@@ -1,12 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
-import json
+import spotipy
 
-from app.api.auth import get_current_user
+from app.api.auth import get_current_user, get_valid_access_token
+from app.core.config import get_settings
 from app.ml.recommender import RecommendationEngine
 
 router = APIRouter()
+settings = get_settings()
 
 class RecommendationRequest(BaseModel):
     seed_tracks: Optional[List[str]] = None
@@ -24,6 +26,21 @@ class RecommendationResponse(BaseModel):
 
 recommendation_engine = RecommendationEngine()
 
+
+async def _require_access_token(current_user: dict) -> str:
+    """
+    Return a valid (auto-refreshed) Spotify access token or raise 401.
+    Centralises the token-extraction logic so each endpoint stays lean.
+    """
+    tokens = current_user.get("spotify_tokens", {})
+    if not tokens.get("access_token"):
+        raise HTTPException(
+            status_code=401,
+            detail="Spotify access token not found. Please re-authenticate.",
+        )
+    return await get_valid_access_token(current_user)
+
+
 @router.post("/generate", response_model=RecommendationResponse)
 async def generate_recommendations(
     request: RecommendationRequest,
@@ -31,15 +48,8 @@ async def generate_recommendations(
 ):
     """Generate personalized recommendations for user"""
     try:
-        spotify_tokens = current_user.get("spotify_tokens", {})
-        access_token = spotify_tokens.get("access_token")
-        
-        if not access_token:
-            raise HTTPException(
-                status_code=401,
-                detail="Spotify access token not found. Please re-authenticate."
-            )
-        
+        access_token = await _require_access_token(current_user)
+
         recommendations = await recommendation_engine.generate_recommendations(
             user_id=current_user["spotify_id"],
             access_token=access_token,
@@ -47,20 +57,20 @@ async def generate_recommendations(
             target_features=request.target_features,
             limit=request.limit
         )
-        
+
         if not recommendations:
             raise HTTPException(
                 status_code=404,
                 detail="Could not generate recommendations. Please try again."
             )
-        
+
         return RecommendationResponse(tracks=recommendations)
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error generating recommendations: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Error generating recommendations: {str(e)}")
+
 
 @router.post("/mood-playlist", response_model=RecommendationResponse)
 async def generate_mood_playlist(
@@ -68,75 +78,58 @@ async def generate_mood_playlist(
     current_user: dict = Depends(get_current_user)
 ):
     """Generate playlist based on mood"""
+    valid_moods = ['happy', 'sad', 'energetic', 'chill', 'focus', 'party']
+    if request.mood.lower() not in valid_moods:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid mood. Must be one of: {', '.join(valid_moods)}"
+        )
+
     try:
-        valid_moods = ['happy', 'sad', 'energetic', 'chill', 'focus', 'party']
-        if request.mood.lower() not in valid_moods:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid mood. Must be one of: {', '.join(valid_moods)}"
-            )
-        
-        spotify_tokens = current_user.get("spotify_tokens", {})
-        access_token = spotify_tokens.get("access_token")
-        
-        if not access_token:
-            raise HTTPException(
-                status_code=401,
-                detail="Spotify access token not found. Please re-authenticate."
-            )
-        
+        access_token = await _require_access_token(current_user)
+
         recommendations = await recommendation_engine.generate_mood_playlist(
             user_id=current_user["spotify_id"],
             access_token=access_token,
             mood=request.mood.lower(),
             limit=request.limit
         )
-        
+
         if not recommendations:
             raise HTTPException(
                 status_code=404,
                 detail=f"Could not generate {request.mood} playlist. Please try again."
             )
-        
+
         return RecommendationResponse(tracks=recommendations)
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error generating mood playlist: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Error generating mood playlist: {str(e)}")
+
 
 @router.get("/profile")
 async def get_user_profile(current_user: dict = Depends(get_current_user)):
     """Get user's music profile and preferences"""
     try:
-        spotify_tokens = current_user.get("spotify_tokens", {})
-        access_token = spotify_tokens.get("access_token")
-        
-        if not access_token:
-            raise HTTPException(
-                status_code=401,
-                detail="Spotify access token not found. Please re-authenticate."
-            )
-        
+        access_token = await _require_access_token(current_user)
+
         user_profile = await recommendation_engine.build_user_profile(
             user_id=current_user["spotify_id"],
             access_token=access_token
         )
-        
+
         if "error" in user_profile:
-            raise HTTPException(
-                status_code=404,
-                detail=user_profile["error"]
-            )
-        
+            raise HTTPException(status_code=404, detail=user_profile["error"])
+
         return user_profile
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error getting user profile: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Error getting user profile: {str(e)}")
+
 
 @router.get("/similar-tracks/{track_id}")
 async def get_similar_tracks(
@@ -146,35 +139,28 @@ async def get_similar_tracks(
 ):
     """Get tracks similar to a specific track"""
     try:
-        spotify_tokens = current_user.get("spotify_tokens", {})
-        access_token = spotify_tokens.get("access_token")
-        
-        if not access_token:
-            raise HTTPException(
-                status_code=401,
-                detail="Spotify access token not found. Please re-authenticate."
-            )
-        
+        access_token = await _require_access_token(current_user)
+
         recommendations = await recommendation_engine.generate_recommendations(
             user_id=current_user["spotify_id"],
             access_token=access_token,
             seed_tracks=[track_id],
             limit=limit
         )
-        
+
         if not recommendations:
             raise HTTPException(
                 status_code=404,
                 detail=f"Could not find similar tracks for track ID: {track_id}"
             )
-        
+
         return {"similar_tracks": recommendations}
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error finding similar tracks: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Error finding similar tracks: {str(e)}")
+
 
 @router.get("/top-tracks")
 async def get_user_top_tracks(
@@ -184,29 +170,22 @@ async def get_user_top_tracks(
 ):
     """Get user's top tracks from Spotify"""
     try:
-        spotify_tokens = current_user.get("spotify_tokens", {})
-        access_token = spotify_tokens.get("access_token")
-        
-        if not access_token:
-            raise HTTPException(
-                status_code=401,
-                detail="Spotify access token not found. Please re-authenticate."
-            )
-        
+        access_token = await _require_access_token(current_user)
+
         top_tracks = await recommendation_engine.get_user_top_tracks(
             sp=await recommendation_engine.get_spotify_client(access_token),
             time_range=time_range,
             limit=limit
         )
-        
+
         return {"top_tracks": top_tracks, "time_range": time_range}
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error getting top tracks: {str(e)}"
-        )
-    
+        raise HTTPException(status_code=500, detail=f"Error getting top tracks: {str(e)}")
+
+
 @router.get("/discover/{discover_type}")
 async def discover_music(
     discover_type: str,
@@ -214,21 +193,22 @@ async def discover_music(
     current_user: dict = Depends(get_current_user)
 ):
     """Discover music by type: similar, new-genres, trending, deep-cuts"""
+    valid_types = {'similar', 'new-genres', 'trending', 'deep-cuts'}
+    if discover_type not in valid_types:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid discover type. Must be one of: {', '.join(valid_types)}"
+        )
+
     try:
-        spotify_tokens = current_user.get("spotify_tokens", {})
-        access_token = spotify_tokens.get("access_token")
-        
-        if not access_token:
-            raise HTTPException(status_code=401, detail="Spotify access token not found")
-        
-        # Map discover types to mood/strategy
+        access_token = await _require_access_token(current_user)
+
         discover_mapping = {
-            'similar': None,  # Use regular recommendations
-            'new-genres': 'focus',  # Use focus mood as placeholder for genre exploration
-            'trending': 'party',    # Use party mood for trending
-            'deep-cuts': 'chill'    # Use chill for deep cuts
+            'new-genres': 'focus',
+            'trending': 'party',
+            'deep-cuts': 'chill',
         }
-        
+
         if discover_type == 'similar':
             recommendations = await recommendation_engine.generate_recommendations(
                 user_id=current_user["spotify_id"],
@@ -236,126 +216,31 @@ async def discover_music(
                 limit=limit
             )
         else:
-            mood = discover_mapping.get(discover_type, 'chill')
+            mood = discover_mapping[discover_type]
             recommendations = await recommendation_engine.generate_mood_playlist(
                 user_id=current_user["spotify_id"],
                 access_token=access_token,
                 mood=mood,
                 limit=limit
             )
-        
+
         return {"tracks": recommendations, "discover_type": discover_type}
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error discovering music: {str(e)}")
+
 
 @router.get("/genres")
 async def get_available_genres(current_user: dict = Depends(get_current_user)):
     """Get available genre seeds from Spotify"""
-    try:
-        # Spotify's available genre seeds (static list)
-        genres = [
-            'acoustic', 'afrobeat', 'alt-rock', 'alternative', 'ambient',
-            'blues', 'bossanova', 'brazil', 'breakbeat', 'british',
-            'chill', 'classical', 'club', 'country', 'dance',
-            'electronic', 'folk', 'funk', 'garage', 'gospel',
-            'hip-hop', 'house', 'indie', 'jazz', 'latin',
-            'pop', 'punk', 'reggae', 'rock', 'soul'
-        ]
-        return {"genres": genres}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error getting genres: {str(e)}")
-    
-@router.get("/debug/user-cache")
-async def debug_user_cache(current_user: dict = Depends(get_current_user)):
-    """Debug endpoint to check user cache"""
-    return {
-        "user_data": current_user,
-        "cache_check": "Cache is working if you see this"
-    }
-
-@router.get("/debug/spotify-test")
-async def test_spotify_api(current_user: dict = Depends(get_current_user)):
-    """Test basic Spotify API access"""
-    try:
-        spotify_tokens = current_user.get("spotify_tokens", {})
-        access_token = spotify_tokens.get("access_token")
-        
-        if not access_token:
-            raise HTTPException(status_code=401, detail="No access token")
-        
-        sp = spotipy.Spotify(auth=access_token)
-        
-        # Test basic API call
-        user_info = sp.me()
-        
-        # Test recommendation with simple parameters
-        try:
-            recs = sp.recommendations(seed_genres=['pop'], limit=5, market='US')
-            return {
-                "user_info": user_info['display_name'],
-                "recommendations_count": len(recs['tracks']),
-                "first_track": recs['tracks'][0]['name'] if recs['tracks'] else None
-            }
-        except Exception as rec_error:
-            return {
-                "user_info": user_info['display_name'],
-                "recommendation_error": str(rec_error)
-            }
-            
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Spotify API test failed: {str(e)}")
-    
-@router.get("/debug/spotify-test")
-async def test_spotify_api(current_user: dict = Depends(get_current_user)):
-    """Test what Spotify API calls actually work"""
-    try:
-        spotify_tokens = current_user.get("spotify_tokens", {})
-        access_token = spotify_tokens.get("access_token")
-        
-        if not access_token:
-            return {"error": "No access token"}
-        
-        sp = spotipy.Spotify(auth=access_token)
-        
-        tests = {}
-        
-        # Test 1: Basic user info
-        try:
-            user = sp.me()
-            tests["user_info"] = f"✅ User: {user['display_name']}"
-        except Exception as e:
-            tests["user_info"] = f"❌ User info failed: {e}"
-        
-        # Test 2: Genre seeds
-        try:
-            genres = sp.recommendation_genre_seeds()
-            tests["genre_seeds"] = f"✅ Found {len(genres['genres'])} genres"
-        except Exception as e:
-            tests["genre_seeds"] = f"❌ Genre seeds failed: {e}"
-        
-        # Test 3: Simple recommendation
-        try:
-            recs = sp.recommendations(seed_genres=['pop'], limit=1)
-            tests["simple_rec"] = f"✅ Simple rec: {recs['tracks'][0]['name']}"
-        except Exception as e:
-            tests["simple_rec"] = f"❌ Simple rec failed: {e}"
-        
-        # Test 4: Recommendation with market
-        try:
-            recs = sp.recommendations(seed_genres=['pop'], limit=1, market='US')
-            tests["market_rec"] = f"✅ Market rec: {recs['tracks'][0]['name']}"
-        except Exception as e:
-            tests["market_rec"] = f"❌ Market rec failed: {e}"
-        
-        # Test 5: Top tracks
-        try:
-            top = sp.current_user_top_tracks(limit=1)
-            tests["top_tracks"] = f"✅ Top track: {top['items'][0]['name']}"
-        except Exception as e:
-            tests["top_tracks"] = f"❌ Top tracks failed: {e}"
-        
-        return tests
-        
-    except Exception as e:
-        return {"error": f"General test failed: {e}"}
+    genres = [
+        'acoustic', 'afrobeat', 'alt-rock', 'alternative', 'ambient',
+        'blues', 'bossanova', 'brazil', 'breakbeat', 'british',
+        'chill', 'classical', 'club', 'country', 'dance',
+        'electronic', 'folk', 'funk', 'garage', 'gospel',
+        'hip-hop', 'house', 'indie', 'jazz', 'latin',
+        'pop', 'punk', 'reggae', 'rock', 'soul'
+    ]
+    return {"genres": genres}

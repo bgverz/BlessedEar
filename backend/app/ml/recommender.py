@@ -1,571 +1,1096 @@
+import asyncio
+import json
 import spotipy
 import pandas as pd
 import random
-from typing import List, Dict, Any
-from datetime import datetime
+import logging
+from typing import List, Dict, Any, Set, Optional
+from datetime import datetime, timezone
 from collections import defaultdict
+
+from app.core.database import get_cache, set_cache
+
+logger = logging.getLogger(__name__)
+
+# Spotify audio feature targets per mood.
+# Keys use Spotify's recommendation API naming:
+#   target_*  → preferred value (soft)
+#   min_*     → hard lower bound
+#   max_*     → hard upper bound
+MOOD_TARGETS: Dict[str, Dict[str, float]] = {
+    'happy':     {'target_valence': 0.80, 'target_energy': 0.70, 'min_valence': 0.55},
+    'sad':       {'target_valence': 0.20, 'target_energy': 0.30, 'max_valence': 0.45},
+    'energetic': {'target_energy': 0.85, 'target_danceability': 0.80, 'min_energy': 0.65},
+    'chill':     {'target_energy': 0.30, 'target_acousticness': 0.60, 'max_energy': 0.55},
+    'focus':     {'target_instrumentalness': 0.50, 'target_energy': 0.45, 'max_speechiness': 0.15},
+    'party':     {'target_danceability': 0.85, 'target_energy': 0.85, 'min_danceability': 0.70},
+}
+
+_AUDIO_FEATURE_COLS = [
+    'danceability', 'energy', 'valence', 'speechiness',
+    'acousticness', 'instrumentalness', 'liveness', 'tempo',
+]
+
+# Recommendation history settings
+_REC_HISTORY_MAX = 500   # track IDs to keep per user
+_REC_HISTORY_TTL = 604800  # 7 days in seconds
+_LIBRARY_CACHE_TTL = 1800  # 30 min — cache user library between generations
+
 
 class RecommendationEngine:
     def __init__(self):
         self.is_initialized = False
-        
+
     async def load_models(self):
-        """Initialize the recommendation engine"""
+        """Initialize the recommendation engine."""
         self.is_initialized = True
-        print("ML models loaded successfully!")
-    
+        logger.info("Recommendation engine initialized")
+
     async def get_spotify_client(self, access_token: str) -> spotipy.Spotify:
-        """Get authenticated Spotify client"""
+        """Return an authenticated Spotify client."""
         return spotipy.Spotify(auth=access_token)
 
-    
+    # ------------------------------------------------------------------
+    # Audio features
+    # ------------------------------------------------------------------
+
     async def extract_audio_features(self, sp: spotipy.Spotify, track_ids: List[str]) -> pd.DataFrame:
-        """Extract audio features for tracks - simplified fallback"""
-        data = []
-        for track_id in track_ids:
-            data.append({
-                'id': track_id,
-                'danceability': round(random.uniform(0.3, 0.8), 3),
-                'energy': round(random.uniform(0.4, 0.9), 3),
-                'valence': round(random.uniform(0.2, 0.7), 3),
-                'speechiness': round(random.uniform(0.05, 0.3), 3),
-                'acousticness': round(random.uniform(0.1, 0.6), 3),
-                'instrumentalness': round(random.uniform(0.0, 0.4), 3),
-                'liveness': round(random.uniform(0.1, 0.3), 3),
-                'tempo': round(random.uniform(90, 160), 1)
-            })
-        return pd.DataFrame(data)
-    
+        """
+        Fetch real audio features from Spotify in batches of 100.
+
+        Error handling per batch:
+          401 → raised immediately (caller should refresh token and retry)
+          403 → Spotify has restricted this API for the app; abort all batches
+          429 → respect Retry-After header, retry the batch once
+          other → log and skip the batch (do not crash the full run)
+
+        Logs: total IDs requested, batch count, per-batch success/failure.
+        """
+        if not track_ids:
+            return pd.DataFrame()
+
+        # Filter out None/empty IDs before batching
+        valid_ids = [tid for tid in track_ids if tid]
+        total = len(valid_ids)
+        batch_count = (total + 99) // 100
+        logger.info(
+            "Audio features: requesting %d track IDs in %d batch(es)",
+            total, batch_count,
+        )
+
+        all_features: List[Dict] = []
+        success_batches = 0
+        fail_batches = 0
+
+        for i in range(0, total, 100):
+            batch = valid_ids[i:i + 100]
+            batch_num = i // 100
+
+            try:
+                features = sp.audio_features(batch)
+                if features:
+                    all_features.extend(f for f in features if f is not None)
+                success_batches += 1
+
+            except spotipy.SpotifyException as exc:
+                if exc.http_status == 401:
+                    logger.warning(
+                        "Audio features batch %d: 401 Unauthorized — raising for token refresh",
+                        batch_num,
+                    )
+                    raise  # caller handles refresh
+
+                elif exc.http_status == 403:
+                    logger.warning(
+                        "Audio features batch %d: 403 Forbidden — "
+                        "Spotify has restricted the audio-features API for this app "
+                        "(deprecated for apps created after 2024). "
+                        "First 3 IDs: %s",
+                        batch_num, batch[:3],
+                    )
+                    fail_batches += 1
+                    break  # No point trying further batches
+
+                elif exc.http_status == 429:
+                    retry_after = 2
+                    if exc.headers:
+                        try:
+                            retry_after = int(exc.headers.get("Retry-After", 2))
+                        except (ValueError, TypeError):
+                            pass
+                    logger.warning(
+                        "Audio features batch %d: 429 rate-limited, waiting %ds",
+                        batch_num, retry_after,
+                    )
+                    await asyncio.sleep(retry_after)
+                    try:
+                        features = sp.audio_features(batch)
+                        if features:
+                            all_features.extend(f for f in features if f is not None)
+                        success_batches += 1
+                    except Exception as retry_exc:
+                        logger.warning(
+                            "Audio features batch %d: retry failed: %s", batch_num, retry_exc
+                        )
+                        fail_batches += 1
+
+                else:
+                    logger.warning(
+                        "Audio features batch %d: HTTP %d — first 3 IDs: %s",
+                        batch_num, exc.http_status, batch[:3],
+                    )
+                    fail_batches += 1
+
+            except Exception as exc:
+                logger.warning(
+                    "Audio features batch %d: unexpected error (size=%d, first 3 IDs: %s): %s",
+                    batch_num, len(batch), batch[:3], exc,
+                )
+                fail_batches += 1
+
+        logger.info(
+            "Audio features done: %d successful batches, %d failed, %d features fetched",
+            success_batches, fail_batches, len(all_features),
+        )
+
+        if not all_features:
+            return pd.DataFrame()
+
+        return pd.DataFrame(all_features)
+
+    # ------------------------------------------------------------------
+    # Library fetching helpers
+    # ------------------------------------------------------------------
+
     async def get_user_top_tracks(self, sp: spotipy.Spotify, time_range: str = "medium_term", limit: int = 50):
-        """Get user's top tracks"""
+        """Get user's top tracks for a given time range."""
         try:
-            results = sp.current_user_top_tracks(time_range=time_range, limit=limit)
+            results = sp.current_user_top_tracks(time_range=time_range, limit=min(limit, 50))
             return results['items']
         except Exception as e:
-            print(f"Error getting top tracks: {e}")
+            logger.warning(f"Error getting top tracks ({time_range}): {e}")
             return []
-    
-    async def get_user_all_tracks(self, sp: spotipy.Spotify, limit: int = 2000):
-        """Get tracks from user's library, playlists, and top tracks with pagination"""
-        all_tracks = []
-        
-        try:
-            print("Fetching top tracks...")
-            for time_range in ['short_term', 'medium_term', 'long_term']:
-                top_tracks = await self.get_user_top_tracks(sp, time_range, 50)
-                all_tracks.extend(top_tracks)
-                print(f"Added {len(top_tracks)} {time_range} top tracks")
-            
-            print("Fetching saved tracks...")
-            offset = 0
-            while len(all_tracks) < limit:
-                try:
-                    saved_batch = sp.current_user_saved_tracks(limit=50, offset=offset)
-                    if not saved_batch['items']:
-                        break
-                        
-                    for item in saved_batch['items']:
-                        if item['track'] and item['track']['id']:
-                            all_tracks.append(item['track'])
-                    
-                    print(f"Added {len(saved_batch['items'])} saved tracks (offset: {offset})")
-                    
-                    if len(saved_batch['items']) < 50:
-                        break
-                        
-                    offset += 50
-                    
-                except Exception as e:
-                    print(f"Error getting saved tracks at offset {offset}: {e}")
-                    break
-            
-            print("Fetching playlist tracks...")
-            user_id = sp.me()['id']
-            
-            playlist_offset = 0
-            all_playlists = []
-            
-            while True:
-                try:
-                    playlist_batch = sp.current_user_playlists(limit=50, offset=playlist_offset)
-                    if not playlist_batch['items']:
-                        break
-                        
-                    all_playlists.extend(playlist_batch['items'])
-                    
-                    if len(playlist_batch['items']) < 50:
-                        break
-                        
-                    playlist_offset += 50
-                    
-                except Exception as e:
-                    print(f"Error getting playlists at offset {playlist_offset}: {e}")
-                    break
-            
-            print(f"Found {len(all_playlists)} total playlists")
-            
-            for i, playlist in enumerate(all_playlists):
-                if len(all_tracks) >= limit:
-                    break
-                    
-                if playlist['owner']['id'] != user_id:
-                    continue
-                    
-                print(f"Processing playlist {i+1}/{len(all_playlists)}: {playlist['name']}")
-                
-                track_offset = 0
-                playlist_track_count = 0
-                
-                while len(all_tracks) < limit:
-                    try:
-                        track_batch = sp.playlist_tracks(
-                            playlist['id'], 
-                            limit=100,
-                            offset=track_offset
-                        )
-                        
-                        if not track_batch['items']:
-                            break
-                        
-                        for item in track_batch['items']:
-                            if item['track'] and item['track']['id']:
-                                all_tracks.append(item['track'])
-                                playlist_track_count += 1
-                        
-                        if len(track_batch['items']) < 100:
-                            break
-                            
-                        track_offset += 100
-                        
-                    except Exception as e:
-                        print(f"Error getting tracks from playlist {playlist['name']}: {e}")
-                        break
-                
-                print(f"Added {playlist_track_count} tracks from '{playlist['name']}'")
-            
-            print("Fetching recently played tracks...")
+
+    async def _fetch_all_top_tracks(self, sp: spotipy.Spotify) -> List[Dict]:
+        """Collect top tracks across all three Spotify time ranges."""
+        tracks: List[Dict] = []
+        for time_range in ('short_term', 'medium_term', 'long_term'):
+            batch = await self.get_user_top_tracks(sp, time_range, 50)
+            tracks.extend(batch)
+            logger.debug(f"Top tracks ({time_range}): {len(batch)}")
+        return tracks
+
+    async def _fetch_all_saved_tracks(self, sp: spotipy.Spotify, max_tracks: int = 2000) -> List[Dict]:
+        """Paginate through ALL liked/saved tracks in the user's library."""
+        tracks: List[Dict] = []
+        offset = 0
+        while len(tracks) < max_tracks:
             try:
-                recent_tracks = sp.current_user_recently_played(limit=50)
-                for item in recent_tracks['items']:
-                    if item['track'] and item['track']['id']:
-                        all_tracks.append(item['track'])
-                print(f"Added {len(recent_tracks['items'])} recently played tracks")
+                batch = sp.current_user_saved_tracks(limit=50, offset=offset)
+                items = batch.get('items', [])
+                if not items:
+                    break
+                for item in items:
+                    if item.get('track') and item['track'].get('id'):
+                        tracks.append(item['track'])
+                        if len(tracks) >= max_tracks:
+                            break
+                logger.debug(f"Saved tracks: +{len(items)} at offset {offset}, total={len(tracks)}")
+                if len(items) < 50 or not batch.get('next'):
+                    break
+                offset += 50
             except Exception as e:
-                print(f"Error getting recently played tracks: {e}")
-            
-            print("Removing duplicates...")
-            unique_tracks = []
-            seen_ids = set()
-            
-            for track in all_tracks:
-                if track and track.get('id') and track['id'] not in seen_ids:
-                    seen_ids.add(track['id'])
-                    unique_tracks.append(track)
-            
-            print(f"Total tracks before deduplication: {len(all_tracks)}")
-            print(f"Total unique tracks collected: {len(unique_tracks)}")
-            
-            random.shuffle(unique_tracks)
-            return unique_tracks[:limit]
-            
-        except Exception as e:
-            print(f"Error in get_user_all_tracks: {e}")
-            return await self.get_user_top_tracks(sp, "medium_term", 50)
-    
-    async def build_user_profile(self, user_id: str, access_token: str):
-        """Build user profile from listening history"""
+                logger.warning(f"Error fetching saved tracks at offset {offset}: {e}")
+                break
+        logger.info(f"Fetched {len(tracks)} saved tracks")
+        return tracks
+
+    async def _fetch_all_playlist_tracks(self, sp: spotipy.Spotify, max_tracks: int = 2000) -> List[Dict]:
+        """Paginate through user-owned playlists and collect all their tracks."""
+        user_id = sp.me()['id']
+
+        # Collect all playlists first
+        all_playlists: List[Dict] = []
+        offset = 0
+        while True:
+            try:
+                batch = sp.current_user_playlists(limit=50, offset=offset)
+                items = batch.get('items', [])
+                if not items:
+                    break
+                all_playlists.extend(items)
+                if len(items) < 50 or not batch.get('next'):
+                    break
+                offset += 50
+            except Exception as e:
+                logger.warning(f"Error fetching playlists at offset {offset}: {e}")
+                break
+
+        logger.info(f"Found {len(all_playlists)} playlists")
+
+        # Collect tracks from user-owned playlists
+        tracks: List[Dict] = []
+        for playlist in all_playlists:
+            if len(tracks) >= max_tracks:
+                break
+            if playlist.get('owner', {}).get('id') != user_id:
+                continue
+
+            track_offset = 0
+            playlist_count = 0
+            while len(tracks) < max_tracks:
+                try:
+                    batch = sp.playlist_tracks(playlist['id'], limit=100, offset=track_offset)
+                    items = batch.get('items', [])
+                    if not items:
+                        break
+                    for item in items:
+                        if item.get('track') and item['track'].get('id'):
+                            tracks.append(item['track'])
+                            playlist_count += 1
+                    if len(items) < 100 or not batch.get('next'):
+                        break
+                    track_offset += 100
+                except Exception as e:
+                    logger.warning(f"Error fetching tracks from '{playlist['name']}': {e}")
+                    break
+
+            logger.debug(f"Playlist '{playlist['name']}': {playlist_count} tracks")
+
+        logger.info(f"Fetched {len(tracks)} playlist tracks")
+        return tracks
+
+    async def _fetch_recently_played(self, sp: spotipy.Spotify) -> List[Dict]:
+        """Get up to 50 recently played tracks (Spotify's hard limit)."""
         try:
-            sp = await self.get_spotify_client(access_token)
-            all_tracks = await self.get_user_all_tracks(sp, limit=500)
-            
-            if not all_tracks:
-                return {"error": "No tracks found for user profile"}
-            
-            avg_features = {
-                'danceability': round(random.uniform(0.5, 0.8), 3),
-                'energy': round(random.uniform(0.6, 0.9), 3),
-                'valence': round(random.uniform(0.4, 0.7), 3),
-                'speechiness': round(random.uniform(0.05, 0.15), 3),
-                'acousticness': round(random.uniform(0.2, 0.5), 3),
-                'instrumentalness': round(random.uniform(0.05, 0.3), 3),
-                'liveness': round(random.uniform(0.1, 0.25), 3),
-                'tempo': round(random.uniform(110, 140), 1)
-            }
-            
-            return {
-                'user_id': user_id,
-                'avg_features': avg_features,
-                'total_tracks_analyzed': len(all_tracks),
-                'created_at': datetime.utcnow().isoformat()
-            }
-            
+            result = sp.current_user_recently_played(limit=50)
+            tracks = [
+                item['track']
+                for item in result.get('items', [])
+                if item.get('track') and item['track'].get('id')
+            ]
+            logger.debug(f"Recently played: {len(tracks)}")
+            return tracks
         except Exception as e:
-            print(f"Error building user profile: {e}")
-            return {"error": str(e)}
-    
-    async def get_artist_similar_tracks(self, sp: spotipy.Spotify, artist_id: str, limit: int = 10):
-        """Get other tracks by the same artist"""
+            logger.warning(f"Error fetching recently played: {e}")
+            return []
+
+    async def get_user_all_tracks(self, sp: spotipy.Spotify, limit: int = 2000) -> List[Dict]:
+        """
+        Collect the user's complete Spotify library from all sources:
+        top tracks, saved/liked songs, owned playlists, recently played.
+        Returns up to `limit` deduplicated tracks (shuffled).
+        """
+        candidates: List[Dict] = []
+        candidates.extend(await self._fetch_all_top_tracks(sp))
+        candidates.extend(await self._fetch_all_saved_tracks(sp, max_tracks=limit))
+        candidates.extend(await self._fetch_all_playlist_tracks(sp, max_tracks=limit))
+        candidates.extend(await self._fetch_recently_played(sp))
+
+        seen: Set[str] = set()
+        unique: List[Dict] = []
+        for track in candidates:
+            tid = track.get('id')
+            if tid and tid not in seen:
+                seen.add(tid)
+                unique.append(track)
+
+        logger.info(
+            f"Library: {len(candidates)} raw → {len(unique)} unique tracks "
+            f"(capped at {limit})"
+        )
+        random.shuffle(unique)
+        return unique[:limit]
+
+    # ------------------------------------------------------------------
+    # Candidate generation helpers
+    # ------------------------------------------------------------------
+
+    async def get_artist_similar_tracks(self, sp: spotipy.Spotify, artist_id: str, limit: int = 10) -> List[Dict]:
+        """Sample tracks from the artist's recent albums and singles."""
         try:
             albums = sp.artist_albums(artist_id, album_type='album,single', limit=10)
-            similar_tracks = []
-            
+            similar_tracks: List[Dict] = []
             for album in albums['items']:
+                if len(similar_tracks) >= limit:
+                    break
                 try:
                     tracks = sp.album_tracks(album['id'], limit=10)
                     for track in tracks['items']:
                         similar_tracks.append({
                             'id': track['id'],
                             'name': track['name'],
-                            'artists': [artist['name'] for artist in track['artists']],
+                            'artists': [a['name'] for a in track['artists']],
                             'album': album['name'],
-                            'album_images': track.get('album', {}).get('images', []),
+                            'album_images': album.get('images', []),
                             'preview_url': track.get('preview_url'),
                             'external_urls': track.get('external_urls', {}),
                             'similarity_score': round(random.uniform(0.85, 0.95), 2),
-                            'recommendation_reason': f"More from {track['artists'][0]['name']}"
+                            'recommendation_reason': f"More from {track['artists'][0]['name']}",
                         })
-                        
                         if len(similar_tracks) >= limit:
                             break
-                            
-                    if len(similar_tracks) >= limit:
-                        break
-                        
-                except Exception as album_error:
-                    print(f"Error getting tracks from album {album['name']}: {album_error}")
+                except Exception:
                     continue
-                    
             return similar_tracks[:limit]
-            
         except Exception as e:
-            print(f"Error getting artist similar tracks: {e}")
+            logger.warning(f"Error getting artist tracks for {artist_id}: {e}")
             return []
-    
-    async def get_album_deep_cuts(self, sp: spotipy.Spotify, album_id: str, exclude_track_ids: set, limit: int = 5):
-        """Get other tracks from the same album"""
+
+    async def get_album_deep_cuts(
+        self, sp: spotipy.Spotify, album_id: str, exclude_track_ids: Set[str], limit: int = 5
+    ) -> List[Dict]:
+        """Return non-excluded tracks from an album (album info fetched once)."""
         try:
+            album_info = sp.album(album_id)
             tracks = sp.album_tracks(album_id, limit=50)
-            deep_cuts = []
-            
+            deep_cuts: List[Dict] = []
             for track in tracks['items']:
                 if track['id'] not in exclude_track_ids:
-                    album_info = sp.album(album_id)
                     deep_cuts.append({
                         'id': track['id'],
                         'name': track['name'],
-                        'artists': [artist['name'] for artist in track['artists']],
+                        'artists': [a['name'] for a in track['artists']],
                         'album': album_info['name'],
-                        'album_images': track.get('album', {}).get('images', []),
+                        'album_images': album_info.get('images', []),
                         'preview_url': track.get('preview_url'),
                         'external_urls': track.get('external_urls', {}),
                         'similarity_score': round(random.uniform(0.80, 0.90), 2),
-                        'recommendation_reason': f"From {album_info['name']}"
+                        'recommendation_reason': f"From {album_info['name']}",
                     })
-                    
                     if len(deep_cuts) >= limit:
                         break
-            
             return deep_cuts
-            
         except Exception as e:
-            print(f"Error getting album deep cuts: {e}")
+            logger.warning(f"Error getting album deep cuts for {album_id}: {e}")
             return []
-    
-    async def get_artist_top_tracks_discovery(self, sp: spotipy.Spotify, artist_id: str, exclude_track_ids: set, limit: int = 3):
-        """Get top tracks from an artist (excluding already known tracks)"""
+
+    async def get_artist_top_tracks_discovery(
+        self, sp: spotipy.Spotify, artist_id: str, exclude_track_ids: Set[str], limit: int = 3
+    ) -> List[Dict]:
+        """Get popular tracks from an artist, skipping already-known ones."""
         try:
-            top_tracks = sp.artist_top_tracks(artist_id)
-            discoveries = []
-            
-            for track in top_tracks['tracks']:
+            result = sp.artist_top_tracks(artist_id)
+            discoveries: List[Dict] = []
+            for track in result['tracks']:
                 if track['id'] not in exclude_track_ids:
                     discoveries.append({
                         'id': track['id'],
                         'name': track['name'],
-                        'artists': [artist['name'] for artist in track['artists']],
+                        'artists': [a['name'] for a in track['artists']],
                         'album': track['album']['name'],
                         'preview_url': track.get('preview_url'),
                         'external_urls': track.get('external_urls', {}),
                         'similarity_score': round(random.uniform(0.80, 0.92), 2),
-                        'recommendation_reason': f"Popular track by {track['artists'][0]['name']}"
+                        'recommendation_reason': f"Popular track by {track['artists'][0]['name']}",
                     })
-                    
                     if len(discoveries) >= limit:
                         break
-            
             return discoveries
-            
         except Exception as e:
-            print(f"Error getting artist top tracks: {e}")
+            logger.warning(f"Error getting artist top tracks for {artist_id}: {e}")
             return []
-    
-    async def generate_recommendations(self, user_id: str, access_token: str, seed_tracks=None, target_features=None, limit: int = 20):
-        """Generate recommendations using only working APIs - POLISHED VERSION"""
-        try:
-            sp = await self.get_spotify_client(access_token)
-            
-            print(f"Starting recommendation generation for user: {user_id}")
-            
-            all_user_tracks = await self.get_user_all_tracks(sp, limit=150)
-            
-            if not all_user_tracks:
-                print("No user tracks found, cannot generate recommendations")
-                return []
-            
-            user_track_ids = {track['id'] for track in all_user_tracks}
-            enhanced_recs = []
-            
-            artist_frequency = defaultdict(int)
-            album_frequency = defaultdict(int)
-            
-            for track in all_user_tracks:
-                for artist in track.get('artists', []):
-                    artist_frequency[artist['id']] += 1
-                if track.get('album', {}).get('id'):
-                    album_frequency[track['album']['id']] += 1
-            
-            favorite_artists = sorted(artist_frequency.items(), key=lambda x: x[1], reverse=True)
-            favorite_albums = sorted(album_frequency.items(), key=lambda x: x[1], reverse=True)
-            
-            print(f"Found {len(favorite_artists)} favorite artists")
-            
-            print("Getting deep cuts from favorite artists...")
-            for artist_id, frequency in favorite_artists[:15]:
-                if len(enhanced_recs) >= limit:
-                    break
-                    
-                artist_tracks = await self.get_artist_similar_tracks(sp, artist_id, 8)
-                
-                new_tracks = [t for t in artist_tracks if t['id'] not in user_track_ids]
-                
-                selected_tracks = new_tracks[:3] if frequency > 3 else new_tracks[:2]
-                enhanced_recs.extend(selected_tracks)
-                
-                for track in selected_tracks:
-                    user_track_ids.add(track['id'])
-            
-            print(f"Found {len(enhanced_recs)} tracks from artist deep dives")
-            
-            if len(enhanced_recs) < limit:
-                print("Getting deep cuts from favorite albums...")
-                for album_id, frequency in favorite_albums[:10]:
-                    if len(enhanced_recs) >= limit:
-                        break
-                        
-                    album_tracks = await self.get_album_deep_cuts(sp, album_id, user_track_ids, 3)
-                    
-                    for track in album_tracks:
-                        if len(enhanced_recs) >= limit:
-                            break
-                        if track['id'] not in user_track_ids:
-                            enhanced_recs.append(track)
-                            user_track_ids.add(track['id'])
-            
-            print(f"Found {len(enhanced_recs)} total tracks after album deep cuts")
-            
-            if len(enhanced_recs) < limit:
-                print("Getting popular tracks from known artists...")
-                for artist_id, frequency in favorite_artists[:20]:
-                    if len(enhanced_recs) >= limit:
-                        break
-                        
-                    popular_tracks = await self.get_artist_top_tracks_discovery(sp, artist_id, user_track_ids, 2)
-                    
-                    for track in popular_tracks:
-                        if len(enhanced_recs) >= limit:
-                            break
-                        if track['id'] not in user_track_ids:
-                            enhanced_recs.append(track)
-                            user_track_ids.add(track['id'])
-            
-            print(f"Found {len(enhanced_recs)} total tracks after popular track discovery")
-            
-            if len(enhanced_recs) < limit:
-                print("Using collaborative discovery...")
-                
-                sample_tracks = random.sample(all_user_tracks, min(10, len(all_user_tracks)))
-                
-                for track in sample_tracks:
-                    if len(enhanced_recs) >= limit:
-                        break
-                        
-                    album_id = track.get('album', {}).get('id')
-                    if album_id:
-                        try:
-                            album_info = sp.album(album_id)
-                            if album_info.get('album_type') == 'compilation':
-                                compilation_tracks = await self.get_album_deep_cuts(sp, album_id, user_track_ids, 4)
-                                
-                                for comp_track in compilation_tracks:
-                                    if len(enhanced_recs) >= limit:
-                                        break
-                                    if comp_track['id'] not in user_track_ids:
-                                        comp_track['recommendation_reason'] = f"From compilation: {album_info['name']}"
-                                        enhanced_recs.append(comp_track)
-                                        user_track_ids.add(comp_track['id'])
-                                        
-                        except Exception as e:
-                            continue
-            
-            random.shuffle(enhanced_recs)
-            
-            final_recs = []
-            reason_counts = defaultdict(int)
-            
-            for track in enhanced_recs:
-                reason_type = track['recommendation_reason'].split(' ')[0]
-                if reason_counts[reason_type] < limit // 3:
-                    final_recs.append(track)
-                    reason_counts[reason_type] += 1
-                    
-                if len(final_recs) >= limit:
-                    break
-            
-            remaining_spots = limit - len(final_recs)
-            if remaining_spots > 0:
-                remaining_tracks = [t for t in enhanced_recs if t not in final_recs]
-                final_recs.extend(remaining_tracks[:remaining_spots])
-            
-            print(f"Final result: {len(final_recs)} real track recommendations generated")
-            return final_recs[:limit]
-            
-        except Exception as e:
-            print(f"Error generating recommendations: {e}")
-            return []
-    
-    async def generate_mood_playlist(self, user_id: str, access_token: str, mood: str, limit: int = 20):
-        """Generate mood-based playlist using user's existing tracks"""
-        try:
-            sp = await self.get_spotify_client(access_token)
-            all_user_tracks = await self.get_user_all_tracks(sp, limit=100)
-            
-            if not all_user_tracks:
-                return []
-            
-            mood_keywords = {
-                'happy': ['love', 'happy', 'good', 'feel', 'dance', 'party', 'sun', 'bright', 'joy', 'smile', 'fun'],
-                'sad': ['sad', 'cry', 'alone', 'broken', 'hurt', 'miss', 'lost', 'tear', 'rain', 'blue', 'lonely'],
-                'energetic': ['run', 'fire', 'energy', 'power', 'rock', 'electric', 'pump', 'wild', 'intense', 'drive'],
-                'chill': ['chill', 'calm', 'slow', 'smooth', 'relax', 'soft', 'dream', 'float', 'easy', 'mellow'],
-                'focus': ['focus', 'ambient', 'instrumental', 'study', 'concentrate', 'mind', 'think', 'clear'],
-                'party': ['party', 'dance', 'club', 'beat', 'bass', 'pump', 'turn', 'up', 'wild', 'night']
-            }
-            
-            keywords = mood_keywords.get(mood, ['music'])
-            mood_tracks = []
-            
-            for track in all_user_tracks:
-                track_name = track['name'].lower()
-                artists = ' '.join([a['name'].lower() for a in track.get('artists', [])])
-                album_name = track.get('album', {}).get('name', '').lower()
-                
-                text_to_search = f"{track_name} {artists} {album_name}"
-                
-                score = sum(1 for keyword in keywords if keyword in text_to_search)
-                
-                if score > 0:
-                    mood_tracks.append((track, score))
-            
-            mood_tracks.sort(key=lambda x: x[1], reverse=True)
-            
-            if mood_tracks:
-                selected_tracks = [track for track, score in mood_tracks[:limit]]
-            else:
-                selected_tracks = random.sample(all_user_tracks, min(limit, len(all_user_tracks)))
-            
-            enhanced_recs = []
-            for track in selected_tracks:
-                enhanced_recs.append({
-                    'id': track['id'],
-                    'name': track['name'],
-                    'artists': [artist['name'] for artist in track['artists']],
-                    'album': track['album']['name'],
-                    'preview_url': track.get('preview_url'),
-                    'external_urls': track.get('external_urls', {}),
-                    'similarity_score': round(random.uniform(0.85, 0.95), 2),
-                    'recommendation_reason': f'Perfect for {mood} mood'
-                })
-            
-            if len(enhanced_recs) < limit:
-                user_track_ids = {track['id'] for track in selected_tracks}
-                remaining_needed = limit - len(enhanced_recs)
-                
-                for track in selected_tracks[:5]: 
-                    if len(enhanced_recs) >= limit:
-                        break
-                        
-                    for artist in track.get('artists', []):
-                        artist_id = artist.get('id')
-                        if artist_id:
-                            additional_tracks = await self.get_artist_similar_tracks(sp, artist_id, 3)
-                            
-                            for add_track in additional_tracks:
-                                if len(enhanced_recs) >= limit:
-                                    break
-                                if add_track['id'] not in user_track_ids:
-                                    add_track['recommendation_reason'] = f'More {mood} vibes from {artist["name"]}'
-                                    enhanced_recs.append(add_track)
-                                    user_track_ids.add(add_track['id'])
-            
-            random.shuffle(enhanced_recs)
-            print(f"Generated {len(enhanced_recs)} tracks for {mood} mood")
-            return enhanced_recs[:limit]
-            
-        except Exception as e:
-            print(f"Error generating mood playlist: {e}")
-            return []
-    # Add these strategies to your recommender.py:
 
-async def get_related_artists_recommendations(self, sp: spotipy.Spotify, artist_id: str, user_track_ids: set, limit: int = 5):
-    """Get recommendations from artists related to the given artist"""
-    try:
-        related = sp.artist_related_artists(artist_id)
-        recommendations = []
-        
-        for related_artist in related['artists'][:5]:  # Check first 5 related artists
-            # Get their top tracks
-            top_tracks = sp.artist_top_tracks(related_artist['id'])
-            for track in top_tracks['tracks'][:3]:  # Take 3 tracks per artist
+    async def get_related_artists_recommendations(
+        self, sp: spotipy.Spotify, artist_id: str, user_track_ids: Set[str], limit: int = 5
+    ) -> List[Dict]:
+        """Get top tracks from artists related to the given artist."""
+        try:
+            related = sp.artist_related_artists(artist_id)
+            recommendations: List[Dict] = []
+            for related_artist in related['artists'][:5]:
+                top_tracks = sp.artist_top_tracks(related_artist['id'])
+                for track in top_tracks['tracks'][:3]:
+                    if track['id'] not in user_track_ids:
+                        recommendations.append({
+                            'id': track['id'],
+                            'name': track['name'],
+                            'artists': [a['name'] for a in track['artists']],
+                            'album': track['album']['name'],
+                            'similarity_score': round(random.uniform(0.75, 0.90), 2),
+                            'recommendation_reason': 'Similar artist to your favorites',
+                        })
+                        if len(recommendations) >= limit:
+                            return recommendations
+            return recommendations
+        except Exception as e:
+            logger.warning(f"Error getting related artists for {artist_id}: {e}")
+            return []
+
+    async def get_genre_recommendations(
+        self, sp: spotipy.Spotify, genres: list, user_track_ids: Set[str], limit: int = 10
+    ) -> List[Dict]:
+        """Get recommendations from Spotify's recommendation API seeded with genres."""
+        try:
+            recs = sp.recommendations(seed_genres=genres[:5], limit=limit * 2, market='US')
+            recommendations: List[Dict] = []
+            for track in recs['tracks']:
                 if track['id'] not in user_track_ids:
                     recommendations.append({
                         'id': track['id'],
                         'name': track['name'],
-                        'artists': [artist['name'] for artist in track['artists']],
+                        'artists': [a['name'] for a in track['artists']],
                         'album': track['album']['name'],
-                        'similarity_score': round(random.uniform(0.75, 0.90), 2),
-                        'recommendation_reason': f"Similar artist to your favorites"
+                        'similarity_score': round(random.uniform(0.70, 0.85), 2),
+                        'recommendation_reason': f"Genre discovery: {', '.join(genres[:2])}",
                     })
-                    
                     if len(recommendations) >= limit:
-                        return recommendations
-        
-        return recommendations
-    except Exception as e:
-        print(f"Error getting related artists: {e}")
-        return []
+                        break
+            return recommendations
+        except Exception as e:
+            logger.warning(f"Error with genre recommendations: {e}")
+            return []
 
-async def get_genre_recommendations(self, sp: spotipy.Spotify, genres: list, user_track_ids: set, limit: int = 10):
-    """Get recommendations using Spotify's recommendation API with genres"""
-    try:
-        # Use Spotify's built-in recommendation engine
-        recs = sp.recommendations(seed_genres=genres[:5], limit=limit*2, market='US')
-        
-        recommendations = []
-        for track in recs['tracks']:
-            if track['id'] not in user_track_ids:
-                recommendations.append({
+    async def _spotify_recommendations(
+        self,
+        sp: spotipy.Spotify,
+        seed_artists: Optional[List[str]] = None,
+        seed_tracks: Optional[List[str]] = None,
+        user_track_ids: Optional[Set[str]] = None,
+        limit: int = 20,
+        **audio_target_kwargs,
+    ) -> List[Dict]:
+        """
+        Thin wrapper around sp.recommendations() that:
+        - Enforces the 1–5 seed limit
+        - Filters out tracks already in the user's library
+        - Normalises output to the standard recommendation dict shape
+        - Accepts audio feature targets/bounds as keyword arguments
+          (e.g. target_valence=0.8, min_energy=0.6)
+        """
+        seed_artists = (seed_artists or [])[:5]
+        remaining_slots = max(0, 5 - len(seed_artists))
+        seed_tracks = (seed_tracks or [])[:remaining_slots]
+
+        total_seeds = len(seed_artists) + len(seed_tracks)
+        if total_seeds == 0:
+            return []
+
+        params = {
+            'seed_artists': seed_artists,
+            'seed_tracks': seed_tracks,
+            'limit': min(limit * 2, 100),
+            'market': 'US',
+        }
+        params.update(audio_target_kwargs)
+
+        try:
+            result = sp.recommendations(**params)
+            recs: List[Dict] = []
+            for track in result.get('tracks', []):
+                if user_track_ids and track['id'] in user_track_ids:
+                    continue
+                recs.append({
                     'id': track['id'],
                     'name': track['name'],
-                    'artists': [artist['name'] for artist in track['artists']],
+                    'artists': [a['name'] for a in track['artists']],
                     'album': track['album']['name'],
-                    'similarity_score': round(random.uniform(0.70, 0.85), 2),
-                    'recommendation_reason': f"Genre discovery: {', '.join(genres[:2])}"
+                    'album_images': track['album'].get('images', []),
+                    'preview_url': track.get('preview_url'),
+                    'external_urls': track.get('external_urls', {}),
+                    'similarity_score': round(random.uniform(0.78, 0.95), 2),
+                    'recommendation_reason': 'Recommended based on your taste',
                 })
-                
-                if len(recommendations) >= limit:
+                if len(recs) >= limit:
                     break
-        
-        return recommendations
-    except Exception as e:
-        print(f"Error with genre recommendations: {e}")
-        return []
+            logger.info("Spotify recommendations API: %d tracks returned", len(recs))
+            return recs
+
+        except spotipy.SpotifyException as exc:
+            if exc.http_status == 404:
+                logger.warning(
+                    "Spotify /v1/recommendations returned 404 — "
+                    "this endpoint is deprecated for apps created after Nov 2024. "
+                    "Falling back to artist-based discovery."
+                )
+            elif exc.http_status == 403:
+                logger.warning(
+                    "Spotify /v1/recommendations returned 403 Forbidden. "
+                    "Params: seed_artists=%s seed_tracks=%s",
+                    params.get("seed_artists"), params.get("seed_tracks"),
+                )
+            elif exc.http_status == 429:
+                retry_after = 2
+                if exc.headers:
+                    try:
+                        retry_after = int(exc.headers.get("Retry-After", 2))
+                    except (ValueError, TypeError):
+                        pass
+                logger.warning(
+                    "Spotify recommendations rate-limited (429), Retry-After=%ds", retry_after
+                )
+            elif exc.http_status == 401:
+                logger.warning("Spotify recommendations: 401 Unauthorized — token may be stale")
+            else:
+                logger.warning(
+                    "Spotify recommendations API error: HTTP %d — "
+                    "seed_artists=%s seed_tracks=%s",
+                    exc.http_status,
+                    params.get("seed_artists"),
+                    params.get("seed_tracks"),
+                )
+            return []
+
+        except Exception as exc:
+            logger.warning("Spotify recommendations API unexpected error: %s", exc)
+            return []
+
+    # ------------------------------------------------------------------
+    # User profile
+    # ------------------------------------------------------------------
+
+    async def build_user_profile(self, user_id: str, access_token: str):
+        """Build a user profile using real Spotify audio features (not random)."""
+        try:
+            sp = await self.get_spotify_client(access_token)
+            all_tracks = await self.get_user_all_tracks(sp, limit=500)
+
+            if not all_tracks:
+                return {"error": "No tracks found for user profile"}
+
+            track_ids = [t['id'] for t in all_tracks]
+            logger.info(f"Fetching audio features for {len(track_ids)} tracks")
+            features_df = await self.extract_audio_features(sp, track_ids)
+
+            if features_df.empty or not any(c in features_df.columns for c in _AUDIO_FEATURE_COLS):
+                # Graceful fallback: neutral values
+                avg_features = {col: 0.5 for col in _AUDIO_FEATURE_COLS}
+                avg_features['tempo'] = 120.0
+            else:
+                avg_features = {
+                    col: round(float(features_df[col].mean()), 3)
+                    for col in _AUDIO_FEATURE_COLS
+                    if col in features_df.columns
+                }
+
+            logger.info(f"Profile built: {len(all_tracks)} tracks analysed for user {user_id}")
+            return {
+                'user_id': user_id,
+                'avg_features': avg_features,
+                'total_tracks_analyzed': len(all_tracks),
+                'created_at': datetime.now(timezone.utc).isoformat(),
+            }
+
+        except Exception as e:
+            logger.error(f"Error building user profile: {e}")
+            return {"error": str(e)}
+
+    # ------------------------------------------------------------------
+    # Cached discovery helpers
+    # ------------------------------------------------------------------
+
+    async def _get_related_artists_cached(self, sp: spotipy.Spotify, artist_id: str) -> List[Dict]:
+        """Fetch related artists, caching results for 24 h."""
+        cache_key = f"artist_related:{artist_id}"
+        cached = await get_cache(cache_key)
+        if cached:
+            try:
+                return json.loads(cached)
+            except Exception:
+                pass
+        try:
+            result = sp.artist_related_artists(artist_id)
+            artists = result.get('artists', [])
+            await set_cache(cache_key, json.dumps(artists), expire=86400)
+            return artists
+        except Exception as exc:
+            logger.warning("Related artists fetch failed for %s: %s", artist_id, exc)
+            return []
+
+    async def _get_artist_top_tracks_cached(self, sp: spotipy.Spotify, artist_id: str) -> List[Dict]:
+        """Fetch artist top tracks, caching results for 24 h."""
+        cache_key = f"artist_top_tracks:{artist_id}"
+        cached = await get_cache(cache_key)
+        if cached:
+            try:
+                return json.loads(cached)
+            except Exception:
+                pass
+        try:
+            result = sp.artist_top_tracks(artist_id)
+            tracks = result.get('tracks', [])
+            await set_cache(cache_key, json.dumps(tracks), expire=86400)
+            return tracks
+        except Exception as exc:
+            logger.warning("Top tracks fetch failed for artist %s: %s", artist_id, exc)
+            return []
+
+    async def _get_user_top_artists(self, sp: spotipy.Spotify) -> List[Dict]:
+        """
+        Collect top artists from all three Spotify time ranges.
+        Uses current_user_top_artists — always available.
+        """
+        artists: List[Dict] = []
+        seen: Set[str] = set()
+        for time_range in ('short_term', 'medium_term', 'long_term'):
+            try:
+                result = sp.current_user_top_artists(time_range=time_range, limit=20)
+                for artist in result.get('items', []):
+                    aid = artist.get('id')
+                    if aid and aid not in seen:
+                        artists.append(artist)
+                        seen.add(aid)
+            except Exception as exc:
+                logger.warning("Top artists (%s) fetch failed: %s", time_range, exc)
+        logger.info("Top artists from Spotify: %d unique across all time ranges", len(artists))
+        return artists
+
+    async def _get_artist_catalog_tracks(
+        self,
+        sp: spotipy.Spotify,
+        artist_id: str,
+        exclude_ids: Set[str],
+        limit: int = 15,
+    ) -> List[Dict]:
+        """
+        Sample tracks from an artist's albums and singles.
+        Uses artist_albums + album_tracks — both always available.
+        Results cached for 24 h (keyed by artist_id).
+        Only tracks whose IDs are not in exclude_ids are returned.
+        """
+        cache_key = f"artist_catalog:{artist_id}"
+        cached = await get_cache(cache_key)
+        if cached:
+            try:
+                all_tracks = json.loads(cached)
+                random.shuffle(all_tracks)  # vary which tracks are returned each call
+                return [t for t in all_tracks if t['id'] not in exclude_ids][:limit]
+            except Exception:
+                pass
+
+        try:
+            albums_result = sp.artist_albums(artist_id, album_type='album,single', limit=10)
+            all_tracks: List[Dict] = []
+            album_items = list(albums_result.get('items', []))
+            random.shuffle(album_items)  # vary which albums we sample from
+            for album in album_items[:5]:
+                try:
+                    tracks_result = sp.album_tracks(album['id'], limit=10)
+                    for track in tracks_result.get('items', []):
+                        tid = track.get('id')
+                        if tid:
+                            all_tracks.append({
+                                'id': tid,
+                                'name': track['name'],
+                                'artists': [a['name'] for a in track.get('artists', [])],
+                                'artist_ids': [
+                                    a['id'] for a in track.get('artists', []) if a.get('id')
+                                ],
+                                'album': album['name'],
+                                'album_images': album.get('images', []),
+                                'preview_url': track.get('preview_url'),
+                                'external_urls': track.get('external_urls', {}),
+                            })
+                except Exception:
+                    continue
+            await set_cache(cache_key, json.dumps(all_tracks), expire=86400)
+            shuffled = list(all_tracks)
+            random.shuffle(shuffled)
+            return [t for t in shuffled if t['id'] not in exclude_ids][:limit]
+        except Exception as exc:
+            logger.warning("Catalog fetch failed for artist %s: %s", artist_id, exc)
+            return []
+
+    async def _get_user_library_cached(self, user_id: str, sp: spotipy.Spotify) -> List[Dict]:
+        """Fetch user's full library, cached for 30 min to avoid repeated heavy API calls."""
+        from app.core.database import get_cache, set_cache
+        cache_key = f"library:{user_id}"
+        cached = await get_cache(cache_key)
+        if cached:
+            try:
+                logger.debug("Library cache hit for user %s", user_id)
+                return json.loads(cached)
+            except Exception:
+                pass
+        tracks = await self.get_user_all_tracks(sp, limit=500)
+        if tracks:
+            try:
+                await set_cache(cache_key, json.dumps(tracks), expire=_LIBRARY_CACHE_TTL)
+            except Exception:
+                pass
+        return tracks
+
+    async def _load_rec_history(self, user_id: str) -> Set[str]:
+        """Load set of recently recommended track IDs for a user."""
+        from app.core.database import get_cache
+        cached = await get_cache(f"rec_history:{user_id}")
+        if cached:
+            try:
+                return set(json.loads(cached))
+            except Exception:
+                pass
+        return set()
+
+    async def _save_rec_history(self, user_id: str, new_track_ids: List[str]) -> None:
+        """Append new track IDs to history, keeping the most recent _REC_HISTORY_MAX entries."""
+        from app.core.database import get_cache, set_cache
+        existing = await get_cache(f"rec_history:{user_id}")
+        history: List[str] = []
+        if existing:
+            try:
+                history = json.loads(existing)
+            except Exception:
+                pass
+        # Prepend newest IDs; drop duplicates; trim to max
+        new_set = set(new_track_ids)
+        combined = list(new_track_ids) + [tid for tid in history if tid not in new_set]
+        trimmed = combined[:_REC_HISTORY_MAX]
+        try:
+            await set_cache(f"rec_history:{user_id}", json.dumps(trimmed), expire=_REC_HISTORY_TTL)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Recommendation generation
+    # ------------------------------------------------------------------
+
+    async def generate_recommendations(
+        self,
+        user_id: str,
+        access_token: str,
+        seed_tracks=None,
+        target_features=None,
+        limit: int = 20,
+    ) -> List[Dict]:
+        """
+        Generate personalised recommendations using only working Spotify endpoints.
+
+        Restricted endpoints intentionally NOT used:
+        - audio_features  → 403 (deprecated for apps created after Nov 2024)
+        - recommendations → 404 (deprecated for apps created after Nov 2024)
+        - artist_related_artists → 404 (deprecated)
+
+        Algorithm (all endpoints confirmed working):
+        1. Fetch user library (cached 30 min to avoid heavy repeated API calls).
+        2. Load recommendation history; build exclusion set (library + history).
+        3. Rank artists by library frequency; augment with Spotify top artists.
+        4. Build full artist pool (up to 50); anchor on top 5, randomly sample 15 more.
+        5. For each seed artist:
+           a. artist_top_tracks → up to 5 tracks (shuffled for variety)
+           b. artist_albums + album_tracks → up to 15 catalog deep cuts (shuffled)
+        6. Candidate pool filtered by exclusion set (library + history).
+        7. Tiered random sampling with artist diversity (pass 1: max 1/artist;
+           pass 2: max 2/artist; pass 3: uncapped fill).
+        8. Save returned track IDs to recommendation history.
+        """
+        try:
+            sp = await self.get_spotify_client(access_token)
+            logger.info("Generating recommendations for user %s", user_id)
+
+            # 1. Fetch user's full library (cached 30 min)
+            all_user_tracks = await self._get_user_library_cached(user_id, sp)
+            if not all_user_tracks:
+                logger.warning("No user tracks found — aborting")
+                return []
+
+            user_track_ids: Set[str] = {t['id'] for t in all_user_tracks}
+            logger.info("Library: %d unique tracks", len(user_track_ids))
+
+            # 2. Load recommendation history; build exclusion set
+            rec_history = await self._load_rec_history(user_id)
+            exclusion_set: Set[str] = user_track_ids | rec_history
+            logger.info(
+                "Exclusion set: %d library + %d history = %d total",
+                len(user_track_ids), len(rec_history), len(exclusion_set),
+            )
+
+            # 3. Extract artists and rank by library frequency
+            artist_frequency: Dict[str, int] = defaultdict(int)
+            for track in all_user_tracks:
+                for artist in track.get('artists', []):
+                    aid = artist.get('id')
+                    if aid:
+                        artist_frequency[aid] += 1
+
+            top_artists_by_freq = sorted(
+                artist_frequency.items(), key=lambda x: x[1], reverse=True
+            )
+            logger.info("Artists in library: %d unique", len(top_artists_by_freq))
+
+            # 4. Augment with Spotify's own top-artist ranking
+            logger.info("Fetching Spotify top artists to augment seeds…")
+            spotify_top = await self._get_user_top_artists(sp)
+            spotify_top_ids = [a['id'] for a in spotify_top if a.get('id')]
+
+            # Build full artist pool (Spotify top + library freq, deduplicated)
+            full_artist_pool: List[str] = []
+            seen_in_pool: Set[str] = set()
+            for aid in spotify_top_ids:
+                if aid not in seen_in_pool:
+                    full_artist_pool.append(aid)
+                    seen_in_pool.add(aid)
+            for aid, _ in top_artists_by_freq[:40]:
+                if aid not in seen_in_pool:
+                    full_artist_pool.append(aid)
+                    seen_in_pool.add(aid)
+
+            # Anchor on top 5 favourites; randomly sample 15 more from the rest
+            anchors = full_artist_pool[:5]
+            rest = full_artist_pool[5:]
+            random.shuffle(rest)
+            seed_artist_ids = anchors + rest[:15]
+            logger.info(
+                "Seed artists: %d anchors + %d random = %d (pool: %d)",
+                len(anchors), min(len(rest), 15), len(seed_artist_ids), len(full_artist_pool),
+            )
+
+            # 5 & 6. Build candidate pool using only working endpoints
+            candidate_pool: List[Dict] = []
+            seen_candidate_ids: Set[str] = set(exclusion_set)
+
+            for artist_id in seed_artist_ids:
+                if len(candidate_pool) >= 300:
+                    break
+
+                # Strategy A: artist top tracks (shuffled for per-call variety)
+                top_tracks = await self._get_artist_top_tracks_cached(sp, artist_id)
+                shuffled_top = list(top_tracks)
+                random.shuffle(shuffled_top)
+                for track in shuffled_top[:5]:
+                    tid = track.get('id')
+                    if tid and tid not in seen_candidate_ids:
+                        candidate_pool.append({
+                            'id': tid,
+                            'name': track['name'],
+                            'artists': [a['name'] for a in track.get('artists', [])],
+                            'artist_ids': [
+                                a['id'] for a in track.get('artists', []) if a.get('id')
+                            ],
+                            'album': track.get('album', {}).get('name', ''),
+                            'album_images': track.get('album', {}).get('images', []),
+                            'preview_url': track.get('preview_url'),
+                            'external_urls': track.get('external_urls', {}),
+                            'similarity_score': round(random.uniform(0.78, 0.93), 2),
+                            'recommendation_reason': 'Popular track from a favourite artist',
+                        })
+                        seen_candidate_ids.add(tid)
+
+                # Strategy B: catalog deep cuts (album-shuffled via _get_artist_catalog_tracks)
+                catalog = await self._get_artist_catalog_tracks(
+                    sp, artist_id, seen_candidate_ids, limit=15
+                )
+                for track in catalog:
+                    if track['id'] not in seen_candidate_ids:
+                        track['similarity_score'] = round(random.uniform(0.72, 0.88), 2)
+                        track['recommendation_reason'] = 'Deep cut from a favourite artist'
+                        candidate_pool.append(track)
+                        seen_candidate_ids.add(track['id'])
+                    if len(candidate_pool) >= 300:
+                        break
+
+            unique_artists_in_pool = len({
+                (t.get('artist_ids') or [t['artists'][0] if t['artists'] else 'unknown'])[0]
+                for t in candidate_pool
+            })
+            logger.info(
+                "Candidate pool: %d tracks | %d unique artists | "
+                "excluded library: %d | excluded history: %d",
+                len(candidate_pool), unique_artists_in_pool,
+                len(user_track_ids), len(rec_history),
+            )
+
+            if not candidate_pool:
+                logger.warning(
+                    "Candidate pool is empty for user %s — "
+                    "artist_top_tracks and artist_albums returned no new tracks",
+                    user_id,
+                )
+                return []
+
+            # 7. Tiered random sampling with artist diversity
+            random.shuffle(candidate_pool)
+            final_recs: List[Dict] = []
+            artist_counts: Dict[str, int] = defaultdict(int)
+
+            def _primary(t: Dict) -> str:
+                ids = t.get('artist_ids', [])
+                return ids[0] if ids else (t['artists'][0] if t['artists'] else 'unknown')
+
+            # Pass 1: max 1 track per artist (strict diversity)
+            for track in candidate_pool:
+                if artist_counts[_primary(track)] < 1:
+                    final_recs.append(track)
+                    artist_counts[_primary(track)] += 1
+                if len(final_recs) >= limit:
+                    break
+
+            # Pass 2: relax to max 2 per artist if still under limit
+            if len(final_recs) < limit:
+                used_ids = {t['id'] for t in final_recs}
+                for track in candidate_pool:
+                    if track['id'] not in used_ids and artist_counts[_primary(track)] < 2:
+                        final_recs.append(track)
+                        used_ids.add(track['id'])
+                        artist_counts[_primary(track)] += 1
+                    if len(final_recs) >= limit:
+                        break
+
+            # Pass 3: uncapped fill for any remaining slots
+            if len(final_recs) < limit:
+                used_ids = {t['id'] for t in final_recs}
+                for track in candidate_pool:
+                    if track['id'] not in used_ids:
+                        final_recs.append(track)
+                        used_ids.add(track['id'])
+                    if len(final_recs) >= limit:
+                        break
+
+            logger.info(
+                "Final: %d tracks, %d unique artists",
+                len(final_recs), len({_primary(t) for t in final_recs}),
+            )
+
+            # 8. Save returned IDs to recommendation history
+            await self._save_rec_history(user_id, [t['id'] for t in final_recs])
+
+            return final_recs[:limit]
+
+        except Exception as exc:
+            logger.error("Error generating recommendations for user %s: %s", user_id, exc)
+            return []
+
+    async def generate_mood_playlist(
+        self, user_id: str, access_token: str, mood: str, limit: int = 20
+    ) -> List[Dict]:
+        """
+        Generate a mood-based playlist using only working Spotify endpoints.
+
+        Restricted endpoints intentionally NOT used:
+        - audio_features  → 403 (deprecated for apps created after Nov 2024)
+        - recommendations → 404 (deprecated for apps created after Nov 2024)
+
+        Strategy (in order):
+        1. Fetch user's full library (saved tracks + top tracks + playlists).
+        2. Keyword matching against track/artist/album names from the library.
+        3. Catalog filler: artist_top_tracks + artist_albums/album_tracks for
+           the user's most-frequent artists, filtered to exclude library tracks.
+        """
+        try:
+            sp = await self.get_spotify_client(access_token)
+            all_user_tracks = await self._get_user_library_cached(user_id, sp)
+            if not all_user_tracks:
+                return []
+
+            user_track_ids: Set[str] = {t['id'] for t in all_user_tracks}
+
+            # Load recommendation history to avoid repeating recently shown tracks
+            rec_history = await self._load_rec_history(user_id)
+            logger.info(
+                "Mood playlist '%s': %d library tracks, %d history exclusions "
+                "(audio_features skipped — 403; recommendations skipped — 404)",
+                mood, len(all_user_tracks), len(rec_history),
+            )
+
+            mood_recs: List[Dict] = []
+
+            # --- Step 1: keyword matching from user's own library ---
+            mood_keywords: Dict[str, List[str]] = {
+                'happy':     ['love', 'happy', 'good', 'feel', 'dance', 'party', 'sun', 'bright', 'joy'],
+                'sad':       ['sad', 'cry', 'alone', 'broken', 'hurt', 'miss', 'lost', 'tear', 'rain'],
+                'energetic': ['run', 'fire', 'energy', 'power', 'rock', 'electric', 'pump', 'wild'],
+                'chill':     ['chill', 'calm', 'slow', 'smooth', 'relax', 'soft', 'dream', 'float'],
+                'focus':     ['focus', 'ambient', 'instrumental', 'study', 'concentrate', 'mind'],
+                'party':     ['party', 'dance', 'club', 'beat', 'bass', 'pump', 'turn', 'wild', 'night'],
+            }
+            keywords = mood_keywords.get(mood, [])
+
+            kw_scored: List[tuple] = []
+            for track in all_user_tracks:
+                if track['id'] in rec_history:
+                    continue  # skip recently recommended tracks
+                text = ' '.join([
+                    track.get('name', ''),
+                    ' '.join(a.get('name', '') for a in track.get('artists', [])),
+                    track.get('album', {}).get('name', ''),
+                ]).lower()
+                score = sum(1 for kw in keywords if kw in text)
+                if score > 0:
+                    kw_scored.append((track, score))
+
+            # Sort by score descending, then shuffle within equal-score groups for variety
+            kw_scored.sort(key=lambda x: x[1], reverse=True)
+            # Shuffle tracks that share the top score so we don't always pick the same ones
+            if kw_scored:
+                top_score = kw_scored[0][1]
+                top_group = [x for x in kw_scored if x[1] == top_score]
+                rest_group = [x for x in kw_scored if x[1] < top_score]
+                random.shuffle(top_group)
+                kw_scored = top_group + rest_group
+
+            for track, _ in kw_scored[:limit]:
+                mood_recs.append({
+                    'id': track['id'],
+                    'name': track['name'],
+                    'artists': [a['name'] for a in track.get('artists', [])],
+                    'album': track.get('album', {}).get('name', ''),
+                    'preview_url': track.get('preview_url'),
+                    'external_urls': track.get('external_urls', {}),
+                    'similarity_score': round(random.uniform(0.78, 0.93), 2),
+                    'recommendation_reason': f'From your library — perfect for {mood}',
+                })
+            logger.info("Mood '%s': %d tracks from keyword matching", mood, len(mood_recs))
+
+            # --- Step 2: catalog filler from favourite artists ---
+            # Uses artist_top_tracks + artist_albums + album_tracks (all working)
+            if len(mood_recs) < limit:
+                artist_frequency: Dict[str, int] = defaultdict(int)
+                for track in all_user_tracks:
+                    for artist in track.get('artists', []):
+                        aid = artist.get('id')
+                        if aid:
+                            artist_frequency[aid] += 1
+
+                existing_ids: Set[str] = {r['id'] for r in mood_recs} | user_track_ids | rec_history
+                needed = limit - len(mood_recs)
+
+                for artist_id, _ in sorted(
+                    artist_frequency.items(), key=lambda x: x[1], reverse=True
+                )[:15]:
+                    if needed <= 0:
+                        break
+
+                    # top tracks first (artist_top_tracks)
+                    top_tracks = await self._get_artist_top_tracks_cached(sp, artist_id)
+                    for track in top_tracks[:3]:
+                        tid = track.get('id')
+                        if tid and tid not in existing_ids:
+                            mood_recs.append({
+                                'id': tid,
+                                'name': track['name'],
+                                'artists': [a['name'] for a in track.get('artists', [])],
+                                'album': track.get('album', {}).get('name', ''),
+                                'album_images': track.get('album', {}).get('images', []),
+                                'preview_url': track.get('preview_url'),
+                                'external_urls': track.get('external_urls', {}),
+                                'similarity_score': round(random.uniform(0.72, 0.88), 2),
+                                'recommendation_reason': f'More {mood} vibes',
+                            })
+                            existing_ids.add(tid)
+                            needed -= 1
+                        if needed <= 0:
+                            break
+
+                    # catalog deep cuts (artist_albums + album_tracks)
+                    if needed > 0:
+                        catalog = await self._get_artist_catalog_tracks(
+                            sp, artist_id, existing_ids, limit=5
+                        )
+                        for track in catalog:
+                            if track['id'] not in existing_ids:
+                                track['similarity_score'] = round(random.uniform(0.70, 0.85), 2)
+                                track['recommendation_reason'] = f'More {mood} vibes'
+                                mood_recs.append(track)
+                                existing_ids.add(track['id'])
+                                needed -= 1
+                            if needed <= 0:
+                                break
+
+                logger.info("Mood '%s': %d tracks after catalog filler", mood, len(mood_recs))
+
+            random.shuffle(mood_recs)
+            logger.info("Generated %d tracks for '%s' mood", len(mood_recs), mood)
+            return mood_recs[:limit]
+
+        except Exception as exc:
+            logger.error("Error generating mood playlist: %s", exc)
+            return []
