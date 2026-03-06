@@ -26,8 +26,10 @@ interface RecommendationTrack {
   artists: string[];
   recommendation_reason: string;
   similarity_score: number;
+  popularity?: number;
   preview_url?: string;
   album?: string;
+  album_image_url?: string | null;
   album_images?: Array<{url: string; width: number; height: number}>;
   external_urls?: {spotify?: string};
 }
@@ -36,9 +38,55 @@ interface TopTrack {
   id: string;
   name: string;
   artists: { name: string }[];
-  album: { name: string };
+  album: {
+    name: string;
+    images?: Array<{ url: string; width: number; height: number }>;
+  };
+  album_images?: Array<{ url: string; width: number; height: number }>;
+  album_image_url?: string | null;
   popularity: number;
   preview_url?: string;
+  external_urls?: { spotify?: string };
+}
+
+interface TasteProfileTrait {
+  name: string;
+  value: number;
+  level: 'Low' | 'Medium' | 'High';
+}
+
+interface TasteProfile {
+  spotify_id: string;
+  archetype: string;
+  top_genres: string[];
+  traits: TasteProfileTrait[];
+  signals: {
+    discovery_score: number;
+    artist_loyalty: number;
+    mainstream_index: number;
+    deep_cut_ratio: number;
+  };
+}
+
+interface ListeningInsightsPayload {
+  spotify_id: string;
+  time_range: 'short_term' | 'medium_term' | 'long_term';
+  archetype: string;
+  listening_insights: {
+    discovery_score: number;
+    artist_loyalty: number;
+    mainstream_index: number;
+  };
+  sound_profile: {
+    genre_breakdown: Array<{ genre: string; percentage: number }>;
+  };
+  hidden_gems: Array<{
+    id: string;
+    name: string;
+    artists: string[];
+    popularity: number;
+    album_image_url?: string | null;
+  }>;
 }
 
 interface SavedPlaylist {
@@ -51,6 +99,46 @@ interface SavedPlaylist {
   is_exported: boolean;
   spotify_playlist_id?: string;
   created_at: string;
+}
+
+interface GeneratedPlaylistTrack {
+  track_id: string;
+  name: string;
+  artist: string;
+  artists?: string[];
+  album?: string;
+  album_cover_url?: string | null;
+  album_images?: Array<{ url: string; width?: number; height?: number }>;
+  spotify_url: string;
+}
+
+interface DiscoverGenreCard {
+  genre: string;
+  description: string;
+  sample_artists: string[];
+}
+
+interface DiscoverArtistCard {
+  id: string;
+  name: string;
+  genres: string[];
+  image_url?: string | null;
+  popularity: number;
+  reason: string;
+  external_urls?: { spotify?: string };
+}
+
+interface DiscoverArtistDetail {
+  artist: DiscoverArtistCard;
+  top_tracks: RecommendationTrack[];
+  similar_artists: DiscoverArtistCard[];
+}
+
+interface DiscoverExplorerPayload {
+  outside_your_bubble: DiscoverGenreCard[];
+  artists_you_should_know: DiscoverArtistCard[];
+  underground_radar: RecommendationTrack[];
+  trending_outside_your_taste: RecommendationTrack[];
 }
 
 async function getCurrentUser(token: string) {
@@ -74,23 +162,37 @@ async function generateRecommendations(token: string, options: any = {}) {
       'Authorization': `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ limit: 10, ...options }),
+    body: JSON.stringify({ limit: 20, ...options }),
   });
   const data = await response.json();
   return data.tracks || [];
 }
 
-async function generateMoodPlaylist(token: string, mood: string) {
-  const response = await fetch(`${API_BASE}/api/recommendations/mood-playlist`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ mood, limit: 8 }),
-  });
-  const data = await response.json();
-  return data.tracks || [];
+async function fetchTasteProfile(token: string): Promise<TasteProfile | null> {
+  try {
+    const response = await fetch(`${API_BASE}/api/analytics/taste-profile`, {
+      headers: { 'Authorization': `Bearer ${token}` },
+    });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+async function fetchListeningInsights(
+  token: string,
+  timeRange: 'short_term' | 'medium_term' | 'long_term',
+): Promise<ListeningInsightsPayload | null> {
+  try {
+    const response = await fetch(`${API_BASE}/api/analytics/listening-insights?time_range=${timeRange}`, {
+      headers: { 'Authorization': `Bearer ${token}` },
+    });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
 }
 
 const GlassCard = ({ children, className = "", ...props }) => (
@@ -101,6 +203,28 @@ const GlassCard = ({ children, className = "", ...props }) => (
     {children}
   </div>
 );
+
+function coerceGeneratedTracks(input: any[]): GeneratedPlaylistTrack[] {
+  if (!Array.isArray(input)) return [];
+  return input
+    .map((track) => {
+      if (!track || typeof track !== 'object') return null;
+      if (typeof track.track_id !== 'string' || !track.track_id) return null;
+      return {
+        track_id: track.track_id,
+        name: typeof track.name === 'string' && track.name ? track.name : 'Unknown Track',
+        artist: typeof track.artist === 'string' && track.artist ? track.artist : 'Unknown Artist',
+        artists: Array.isArray(track.artists) ? track.artists.filter((a: any) => typeof a === 'string') : undefined,
+        album: typeof track.album === 'string' ? track.album : '',
+        album_cover_url: typeof track.album_cover_url === 'string' ? track.album_cover_url : null,
+        album_images: Array.isArray(track.album_images) ? track.album_images : [],
+        spotify_url: typeof track.spotify_url === 'string' && track.spotify_url
+          ? track.spotify_url
+          : `https://open.spotify.com/track/${track.track_id}`,
+      } as GeneratedPlaylistTrack;
+    })
+    .filter(Boolean) as GeneratedPlaylistTrack[];
+}
 
 const Sidebar = ({ activeTab, setActiveTab, userDisplayName }) => {
   const tabs = [
@@ -181,11 +305,21 @@ const Sidebar = ({ activeTab, setActiveTab, userDisplayName }) => {
   );
 };
 
-const AudioFeatureRadar = ({ userProfile }: { userProfile: UserProfile | null }) => {
-  if (!userProfile) {
+const TasteProfileCard = ({
+  profile,
+  isLoading,
+  hasError,
+  onRetry,
+}: {
+  profile: TasteProfile | null;
+  isLoading: boolean;
+  hasError: boolean;
+  onRetry?: () => void;
+}) => {
+  if (isLoading) {
     return (
       <GlassCard className="h-80">
-        <h3 className="text-lg font-semibold text-white mb-4">Your Music DNA</h3>
+        <h3 className="text-lg font-semibold text-white mb-4">Your Taste Profile</h3>
         <div className="flex items-center justify-center h-48">
           <Loader2 className="w-8 h-8 animate-spin text-green-500" />
         </div>
@@ -193,51 +327,51 @@ const AudioFeatureRadar = ({ userProfile }: { userProfile: UserProfile | null })
     );
   }
 
-  const features = [
-    { name: 'Energy', value: userProfile?.avg_features?.energy || 0, color: '#FF6B6B' },
-    { name: 'Valence', value: userProfile?.avg_features?.valence || 0, color: '#4ECDC4' },
-    { name: 'Dance', value: userProfile?.avg_features?.danceability || 0, color: '#45B7D1' },
-    { name: 'Acoustic', value: userProfile?.avg_features?.acousticness || 0, color: '#96CEB4' },
-    { name: 'Speech', value: userProfile?.avg_features?.speechiness || 0, color: '#FFEAA7' },
-    { name: 'Liveness', value: userProfile?.avg_features?.liveness || 0, color: '#DDA0DD' },
-  ];
+  if (hasError || !profile) {
+    return (
+      <GlassCard className="h-80">
+        <h3 className="text-lg font-semibold text-white mb-4">Your Taste Profile</h3>
+        <div className="flex flex-col items-center justify-center h-48 gap-3">
+          <p className="text-sm text-gray-400 text-center">Taste profile is temporarily unavailable</p>
+          {onRetry && (
+            <button
+              onClick={onRetry}
+              className="text-xs text-green-400 hover:text-green-300 border border-green-500/30 px-3 py-1 rounded-lg transition-colors"
+            >
+              Retry
+            </button>
+          )}
+        </div>
+      </GlassCard>
+    );
+  }
 
   return (
     <GlassCard className="h-80">
-      <h3 className="text-lg font-semibold text-white mb-4">Your Music DNA</h3>
-      <div className="relative w-full h-48 flex items-center justify-center">
-        <div className="relative w-40 h-40">
-          {features.map((feature, index) => {
-            const angle = (index * 60) - 90;
-            const x = Math.cos(angle * Math.PI / 180) * (60 + feature.value * 20);
-            const y = Math.sin(angle * Math.PI / 180) * (60 + feature.value * 20);
+      <h3 className="text-lg font-semibold text-white mb-1">Your Taste Profile</h3>
+      <p className="text-sm text-green-300 mb-3">{profile.archetype}</p>
 
-            return (
-              <div
-                key={feature.name}
-                className="absolute w-3 h-3 rounded-full"
-                style={{
-                  backgroundColor: feature.color,
-                  left: `calc(50% + ${x}px - 6px)`,
-                  top: `calc(50% + ${y}px - 6px)`,
-                  boxShadow: `0 0 20px ${feature.color}40`
-                }}
-              />
-            );
-          })}
-          <div className="absolute inset-0 rounded-full border border-white/20"></div>
-          <div className="absolute inset-4 rounded-full border border-white/10"></div>
-          <div className="absolute inset-8 rounded-full border border-white/5"></div>
+      <div className="mb-3">
+        <p className="text-xs text-gray-400 mb-1">Top Genres</p>
+        <div className="flex flex-wrap gap-2">
+          {profile.top_genres.slice(0, 6).map((genre) => (
+            <span key={genre} className="text-xs bg-white/10 text-gray-200 px-2 py-1 rounded-full">
+              {genre}
+            </span>
+          ))}
         </div>
       </div>
-      <div className="flex flex-wrap gap-2 mt-4">
-        {features.map((feature) => (
-          <div key={feature.name} className="flex items-center gap-1">
-            <div
-              className="w-2 h-2 rounded-full"
-              style={{ backgroundColor: feature.color }}
-            />
-            <span className="text-xs text-gray-300">{feature.name}</span>
+
+      <div className="space-y-2">
+        {profile.traits.slice(0, 4).map((trait) => (
+          <div key={trait.name}>
+            <div className="flex items-center justify-between text-xs mb-1">
+              <span className="text-gray-300">{trait.name}</span>
+              <span className="text-gray-400">{trait.level} · {trait.value}%</span>
+            </div>
+            <div className="w-full h-1.5 rounded-full bg-white/10">
+              <div className="h-1.5 rounded-full bg-gradient-to-r from-green-500 to-cyan-400" style={{ width: `${trait.value}%` }} />
+            </div>
           </div>
         ))}
       </div>
@@ -247,11 +381,19 @@ const AudioFeatureRadar = ({ userProfile }: { userProfile: UserProfile | null })
 
 /** Pick the best-fit album image URL from track.album_images. */
 const getAlbumImage = (track: RecommendationTrack, size: 'small' | 'medium' = 'small') => {
+  if (track.album_image_url) return track.album_image_url;
   const imgs = track.album_images;
   if (!imgs || imgs.length === 0) return null;
   // Spotify returns [640, 300, 64] — index 2 = small thumbnail, index 1 = medium
   if (size === 'small') return imgs[2]?.url ?? imgs[1]?.url ?? imgs[0]?.url;
   return imgs[1]?.url ?? imgs[0]?.url;
+};
+
+const getTopTrackAlbumImage = (track: TopTrack): string | null => {
+  if (track.album_image_url) return track.album_image_url;
+  if (track.album_images?.length) return track.album_images[0]?.url ?? null;
+  if (track.album?.images?.length) return track.album.images[0]?.url ?? null;
+  return null;
 };
 
 /** List-row card used in Dashboard and playlist detail views. */
@@ -380,17 +522,23 @@ const AlbumTrackCard = ({ track }: { track: RecommendationTrack }) => {
 
 const DashboardContent = ({
   userProfile,
+  tasteProfile,
+  isTasteProfileLoading,
+  tasteProfileError,
+  onRetryTasteProfile,
   recommendations,
   isLoading,
   onGenerateRecommendations,
-  onGenerateMoodPlaylist,
   onSavePlaylist
 }: {
   userProfile: UserProfile | null;
+  tasteProfile: TasteProfile | null;
+  isTasteProfileLoading: boolean;
+  tasteProfileError: boolean;
+  onRetryTasteProfile: () => void;
   recommendations: RecommendationTrack[];
   isLoading: boolean;
   onGenerateRecommendations: () => void;
-  onGenerateMoodPlaylist: (mood: string) => void;
   onSavePlaylist: () => void;
 }) => {
   return (
@@ -451,11 +599,16 @@ const DashboardContent = ({
         </div>
       </GlassCard>
 
-      {/* Audio Features */}
-      <AudioFeatureRadar userProfile={userProfile} />
+      {/* Taste Profile */}
+      <TasteProfileCard
+        profile={tasteProfile}
+        isLoading={isTasteProfileLoading}
+        hasError={tasteProfileError}
+        onRetry={onRetryTasteProfile}
+      />
 
       {/* Recommendations */}
-      <GlassCard className="lg:col-span-2">
+      <GlassCard className="lg:col-span-3">
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-lg font-semibold text-white">AI Recommendations</h3>
           {recommendations.length > 0 && (
@@ -473,7 +626,7 @@ const DashboardContent = ({
             <Loader2 className="w-8 h-8 animate-spin text-green-500" />
           </div>
         ) : recommendations.length > 0 ? (
-          <div className="space-y-3">
+          <div className="space-y-3 max-h-[32rem] overflow-y-auto pr-1">
             {recommendations.map((track, index) => (
               <RecommendationCard key={track.id || index} track={track} />
             ))}
@@ -500,167 +653,248 @@ const DashboardContent = ({
         )}
       </GlassCard>
 
-      {/* Quick Actions */}
-      <GlassCard>
-        <h3 className="text-lg font-semibold text-white mb-4">Quick Actions</h3>
-        <div className="space-y-3">
-          <button
-            onClick={() => onGenerateMoodPlaylist('happy')}
-            className="w-full bg-gradient-to-r from-purple-500/20 to-pink-500/20 border border-purple-500/30 text-white py-3 rounded-xl hover:from-purple-500/30 hover:to-pink-500/30 transition-all duration-200"
-          >
-            Happy Playlist
-          </button>
-          <button
-            onClick={() => onGenerateMoodPlaylist('chill')}
-            className="w-full bg-gradient-to-r from-green-500/20 to-blue-500/20 border border-green-500/30 text-white py-3 rounded-xl hover:from-green-500/30 hover:to-blue-500/30 transition-all duration-200"
-          >
-            Chill Vibes
-          </button>
-          <button
-            onClick={() => onGenerateMoodPlaylist('energetic')}
-            className="w-full bg-gradient-to-r from-orange-500/20 to-red-500/20 border border-orange-500/30 text-white py-3 rounded-xl hover:from-orange-500/30 hover:to-red-500/30 transition-all duration-200"
-          >
-            High Energy
-          </button>
-        </div>
-      </GlassCard>
     </div>
   );
 };
 
 // DISCOVER TAB COMPONENT
 const DiscoverTab = ({ token }: { token: string }) => {
-  const [discoverType, setDiscoverType] = useState('similar');
+  const [explorer, setExplorer] = useState<DiscoverExplorerPayload | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [recommendations, setRecommendations] = useState<RecommendationTrack[]>([]);
+  const [error, setError] = useState(false);
+  const [genreTracks, setGenreTracks] = useState<RecommendationTrack[]>([]);
+  const [selectedGenre, setSelectedGenre] = useState<string | null>(null);
+  const [genreLoading, setGenreLoading] = useState(false);
+  const [selectedArtist, setSelectedArtist] = useState<DiscoverArtistDetail | null>(null);
+  const [artistLoading, setArtistLoading] = useState(false);
 
-  const discoverOptions = [
-    { id: 'similar', label: 'Similar to My Taste', description: 'Based on your listening history' },
-    { id: 'new-genres', label: 'New Genres', description: 'Explore different musical styles' },
-    { id: 'trending', label: 'Trending Now', description: 'Popular tracks worldwide' },
-    { id: 'deep-cuts', label: 'Deep Cuts', description: 'Hidden gems and B-sides' },
-  ];
-
-  const moodOptions = [
-    { id: 'happy', label: 'Happy', color: 'from-yellow-500 to-orange-500' },
-    { id: 'energetic', label: 'Energetic', color: 'from-red-500 to-pink-500' },
-    { id: 'chill', label: 'Chill', color: 'from-blue-500 to-cyan-500' },
-    { id: 'focus', label: 'Focus', color: 'from-purple-500 to-indigo-500' },
-    { id: 'sad', label: 'Melancholy', color: 'from-gray-500 to-blue-500' },
-    { id: 'party', label: 'Party', color: 'from-green-500 to-emerald-500' },
-  ];
-
-  const handleDiscoverMusic = async (type: string) => {
+  const loadExplorer = async () => {
     setIsLoading(true);
+    setError(false);
     try {
-      let response;
-      if (['similar', 'new-genres', 'trending', 'deep-cuts'].includes(type)) {
-        response = await fetch(`${API_BASE}/api/recommendations/discover/${type}?limit=12`, {
-          headers: { 'Authorization': `Bearer ${token}` },
-        });
-        const data = await response.json();
-        setRecommendations(data.tracks || []);
-      } else {
-        // Mood-based
-        response = await fetch(`${API_BASE}/api/recommendations/mood-playlist`, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ mood: type, limit: 12 }),
-        });
-        const data = await response.json();
-        setRecommendations(data.tracks || []);
-      }
+      const response = await fetch(`${API_BASE}/api/recommendations/discover/explorer`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      if (!response.ok) throw new Error('Failed to load explorer');
+      const data = await response.json();
+      setExplorer(data);
     } catch (error) {
-      console.error('Error discovering music:', error);
+      console.error('Error loading discover explorer:', error);
+      setError(true);
     } finally {
       setIsLoading(false);
     }
   };
 
+  const loadGenreFeed = async (genre: string) => {
+    setSelectedGenre(genre);
+    setGenreLoading(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/recommendations/discover/genre/${encodeURIComponent(genre)}?limit=12`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      const data = await response.json();
+      setGenreTracks(data.tracks || []);
+    } catch (error) {
+      console.error('Error loading genre feed:', error);
+      setGenreTracks([]);
+    } finally {
+      setGenreLoading(false);
+    }
+  };
+
+  const loadArtistDetail = async (artistId: string) => {
+    setArtistLoading(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/recommendations/discover/artist/${artistId}`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      const data = await response.json();
+      if (response.ok) setSelectedArtist(data);
+    } catch (error) {
+      console.error('Error loading artist detail:', error);
+      setSelectedArtist(null);
+    } finally {
+      setArtistLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (token) loadExplorer();
+  }, [token]);
+
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-2xl font-bold text-white mb-2">Discover New Music</h2>
-        <p className="text-gray-300">AI-powered music discovery tailored to your taste</p>
+        <h2 className="text-2xl font-bold text-white mb-2">Music Explorer</h2>
+        <p className="text-gray-300">Step outside your algorithm bubble and explore where your taste can go next.</p>
       </div>
 
       <GlassCard>
-        <h3 className="text-lg font-semibold text-white mb-4">Discovery Mode</h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          {discoverOptions.map((option) => (
-            <button
-              key={option.id}
-              onClick={() => {
-                setDiscoverType(option.id);
-                handleDiscoverMusic(option.id);
-              }}
-              className={`p-4 rounded-xl border-2 transition-all duration-200 text-left ${
-                discoverType === option.id
-                  ? 'border-green-500 bg-green-500/10'
-                  : 'border-white/20 hover:border-white/40 hover:bg-white/5'
-              }`}
-            >
-              <h4 className="font-medium text-white text-sm">{option.label}</h4>
-              <p className="text-xs text-gray-400 mt-1">{option.description}</p>
-            </button>
-          ))}
-        </div>
-      </GlassCard>
-
-      <GlassCard>
-        <h3 className="text-lg font-semibold text-white mb-4">Mood-Based Discovery</h3>
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-          {moodOptions.map((mood) => (
-            <button
-              key={mood.id}
-              onClick={() => handleDiscoverMusic(mood.id)}
-              className={`p-4 rounded-xl bg-gradient-to-br ${mood.color} hover:scale-105 transition-all duration-200 text-white font-medium text-sm`}
-            >
-              {mood.label}
-            </button>
-          ))}
-        </div>
-      </GlassCard>
-
-      <GlassCard>
         <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-semibold text-white">Discovered Tracks</h3>
-          {recommendations.length > 0 && (
-            <button
-              onClick={() => handleDiscoverMusic(discoverType)}
-              className="text-sm text-green-400 hover:text-green-300 transition-colors"
-            >
-              Refresh
-            </button>
-          )}
+          <h3 className="text-lg font-semibold text-white">Outside Your Bubble</h3>
+          <button
+            onClick={loadExplorer}
+            className="text-sm text-green-400 hover:text-green-300 transition-colors"
+          >
+            Refresh Explorer
+          </button>
         </div>
-
         {isLoading ? (
-          <div className="flex items-center justify-center h-32">
+          <div className="flex items-center justify-center h-24">
             <Loader2 className="w-8 h-8 animate-spin text-green-500" />
           </div>
-        ) : recommendations.length > 0 ? (
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
-            {recommendations.map((track, index) => (
-              <AlbumTrackCard key={track.id || index} track={track} />
-            ))}
+        ) : error || !explorer ? (
+          <div className="text-sm text-gray-400">Explorer data unavailable. Try refresh.</div>
+        ) : (
+          <>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+              {explorer.outside_your_bubble.map((card) => (
+                <button
+                  key={card.genre}
+                  onClick={() => loadGenreFeed(card.genre)}
+                  className="text-left p-4 rounded-xl border border-white/15 bg-white/5 hover:bg-white/10 hover:border-green-500/50 transition-all"
+                >
+                  <p className="text-sm font-semibold text-white mb-1">{card.genre}</p>
+                  <p className="text-xs text-gray-300 mb-2">{card.description}</p>
+                  <p className="text-xs text-green-300 truncate">{card.sample_artists.join(' • ') || 'Tap to explore tracks'}</p>
+                </button>
+              ))}
+            </div>
+          </>
+        )}
+      </GlassCard>
+
+      <GlassCard>
+        <h3 className="text-lg font-semibold text-white mb-4">Artists You Should Know</h3>
+        {isLoading || !explorer ? (
+          <div className="h-24 flex items-center justify-center">
+            <Loader2 className="w-7 h-7 animate-spin text-green-500" />
           </div>
         ) : (
-          <div className="text-center py-8">
-            <Sparkles className="w-12 h-12 text-gray-400 mx-auto mb-4" />
-            <p className="text-gray-400 mb-4">Choose a discovery mode to find new music</p>
-            <button
-              onClick={() => handleDiscoverMusic('similar')}
-              className="bg-green-500 text-white px-6 py-2 rounded-lg hover:bg-green-600 transition-colors"
-            >
-              Start Discovering
-            </button>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+            {explorer.artists_you_should_know.slice(0, 9).map((artist) => (
+              <button
+                key={artist.id}
+                onClick={() => loadArtistDetail(artist.id)}
+                className="text-left p-3 rounded-xl border border-white/15 bg-white/5 hover:bg-white/10 transition-all"
+              >
+                <div className="flex items-center gap-3 mb-2">
+                  <div className="w-12 h-12 rounded-full overflow-hidden bg-white/10 flex items-center justify-center">
+                    {artist.image_url ? (
+                      <img src={artist.image_url} alt={artist.name} className="w-full h-full object-cover" />
+                    ) : (
+                      <Music className="w-5 h-5 text-gray-300" />
+                    )}
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-white truncate">{artist.name}</p>
+                    <p className="text-xs text-gray-400 truncate">{artist.genres.join(', ') || 'Genre blend'}</p>
+                  </div>
+                </div>
+                <p className="text-xs text-green-300">{artist.reason}</p>
+              </button>
+            ))}
           </div>
         )}
       </GlassCard>
+
+      {(selectedGenre || genreTracks.length > 0) && (
+        <GlassCard>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-semibold text-white">
+              {selectedGenre ? `Exploring ${selectedGenre}` : 'Genre Feed'}
+            </h3>
+            {selectedGenre && (
+              <button onClick={() => loadGenreFeed(selectedGenre)} className="text-sm text-green-400 hover:text-green-300">
+                Refresh
+              </button>
+            )}
+          </div>
+          {genreLoading ? (
+            <div className="h-24 flex items-center justify-center">
+              <Loader2 className="w-7 h-7 animate-spin text-green-500" />
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
+              {genreTracks.slice(0, 12).map((track, index) => (
+                <AlbumTrackCard key={track.id || index} track={track} />
+              ))}
+            </div>
+          )}
+        </GlassCard>
+      )}
+
+      {selectedArtist && (
+        <GlassCard>
+          <div className="flex items-start justify-between mb-4 gap-3">
+            <div>
+              <h3 className="text-lg font-semibold text-white">{selectedArtist.artist.name}</h3>
+              <p className="text-sm text-gray-300">{selectedArtist.artist.reason}</p>
+            </div>
+            {artistLoading && <Loader2 className="w-5 h-5 animate-spin text-green-500" />}
+          </div>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div>
+              <p className="text-sm text-gray-300 mb-2">Top Tracks</p>
+              <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+                {selectedArtist.top_tracks.slice(0, 6).map((track, index) => (
+                  <RecommendationCard key={track.id || index} track={track} />
+                ))}
+              </div>
+            </div>
+            <div>
+              <p className="text-sm text-gray-300 mb-2">Similar Artists</p>
+              <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+                {selectedArtist.similar_artists.slice(0, 8).map((artist) => (
+                  <div key={artist.id} className="p-2 rounded-lg bg-white/5 border border-white/10">
+                    <p className="text-sm text-white">{artist.name}</p>
+                    <p className="text-xs text-gray-400">{artist.genres.join(', ') || 'Genre blend'}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </GlassCard>
+      )}
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+        <GlassCard>
+          <h3 className="text-lg font-semibold text-white mb-4">Underground Radar</h3>
+          {!explorer ? (
+            <div className="h-24 flex items-center justify-center"><Loader2 className="w-7 h-7 animate-spin text-green-500" /></div>
+          ) : (
+            <div className="space-y-3 max-h-[30rem] overflow-y-auto pr-1">
+              {explorer.underground_radar.slice(0, 12).map((track, index) => (
+                <div key={track.id || index} className="relative">
+                  <RecommendationCard track={track} />
+                  <span className="absolute top-2 right-2 text-[10px] bg-green-500/20 text-green-300 px-2 py-0.5 rounded-full">
+                    {track.popularity}/100
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </GlassCard>
+
+        <GlassCard>
+          <h3 className="text-lg font-semibold text-white mb-2">Trending Outside Your Taste</h3>
+          {!explorer ? (
+            <div className="h-24 flex items-center justify-center"><Loader2 className="w-7 h-7 animate-spin text-green-500" /></div>
+          ) : (
+            <>
+              <p className="text-xs text-gray-400 mb-3">
+                Scenes outside your usual taste
+              </p>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                {explorer.trending_outside_your_taste.slice(0, 9).map((track, index) => (
+                  <AlbumTrackCard key={track.id || index} track={track} />
+                ))}
+              </div>
+            </>
+          )}
+        </GlassCard>
+      </div>
     </div>
   );
 };
@@ -670,6 +904,9 @@ const AnalyticsTab = ({ token, userProfile }: { token: string; userProfile: User
   const [timeRange, setTimeRange] = useState('medium_term');
   const [topTracks, setTopTracks] = useState<TopTrack[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [insights, setInsights] = useState<ListeningInsightsPayload | null>(null);
+  const [insightsLoading, setInsightsLoading] = useState(false);
+  const [insightsError, setInsightsError] = useState(false);
 
   const timeRanges = [
     { id: 'short_term', label: 'Last 4 Weeks' },
@@ -680,6 +917,7 @@ const AnalyticsTab = ({ token, userProfile }: { token: string; userProfile: User
   useEffect(() => {
     if (token) {
       loadTopTracks();
+      loadInsights();
     }
   }, [token, timeRange]);
 
@@ -698,24 +936,24 @@ const AnalyticsTab = ({ token, userProfile }: { token: string; userProfile: User
     }
   };
 
-  const AudioFeatureChart = ({ feature, value, color }: { feature: string; value: number; color: string }) => (
-    <div className="bg-white/5 rounded-lg p-4">
-      <div className="flex items-center justify-between mb-2">
-        <span className="text-sm font-medium text-white capitalize">{feature}</span>
-        <span className="text-sm text-gray-400">{Math.round(value * 100)}%</span>
-      </div>
-      <div className="w-full bg-gray-700 rounded-full h-2">
-        <div
-          className="h-2 rounded-full transition-all duration-500"
-          style={{
-            width: `${value * 100}%`,
-            backgroundColor: color,
-            boxShadow: `0 0 10px ${color}40`
-          }}
-        />
-      </div>
-    </div>
-  );
+  const loadInsights = async () => {
+    setInsightsLoading(true);
+    setInsightsError(false);
+    try {
+      const data = await fetchListeningInsights(token, timeRange as 'short_term' | 'medium_term' | 'long_term');
+      if (!data) {
+        setInsightsError(true);
+        setInsights(null);
+      } else {
+        setInsights(data);
+      }
+    } catch {
+      setInsightsError(true);
+      setInsights(null);
+    } finally {
+      setInsightsLoading(false);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -746,58 +984,102 @@ const AnalyticsTab = ({ token, userProfile }: { token: string; userProfile: User
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <GlassCard>
-          <h3 className="text-lg font-semibold text-white mb-4">Your Music DNA</h3>
-          {userProfile ? (
-            <div className="space-y-3">
-              <AudioFeatureChart feature="energy" value={userProfile.avg_features.energy} color="#ff6b6b" />
-              <AudioFeatureChart feature="danceability" value={userProfile.avg_features.danceability} color="#4ecdc4" />
-              <AudioFeatureChart feature="valence" value={userProfile.avg_features.valence} color="#45b7d1" />
-              <AudioFeatureChart feature="acousticness" value={userProfile.avg_features.acousticness} color="#96ceb4" />
-              <AudioFeatureChart feature="speechiness" value={userProfile.avg_features.speechiness} color="#ffeaa7" />
-              <AudioFeatureChart feature="liveness" value={userProfile.avg_features.liveness} color="#dda0dd" />
+          <h3 className="text-lg font-semibold text-white mb-4">Listening Insights</h3>
+          {insightsLoading ? (
+            <div className="flex items-center justify-center h-40">
+              <Loader2 className="w-8 h-8 animate-spin text-green-500" />
+            </div>
+          ) : insightsError || !insights ? (
+            <div className="text-center py-10">
+              <p className="text-sm text-gray-400 mb-3">Listening insights unavailable</p>
+              <button
+                onClick={loadInsights}
+                className="text-xs text-green-400 hover:text-green-300 border border-green-500/30 px-3 py-1 rounded-lg transition-colors"
+              >
+                Retry
+              </button>
             </div>
           ) : (
-            <div className="flex items-center justify-center h-48">
-              <Loader2 className="w-8 h-8 animate-spin text-green-500" />
+            <div className="space-y-4">
+              <p className="text-sm text-green-300">{insights.archetype}</p>
+              <div className="bg-white/5 rounded-lg p-4">
+                <p className="text-xs text-gray-400">Discovery Score</p>
+                <p className="text-xl font-bold text-white">{Math.round(insights.listening_insights.discovery_score * 100)}%</p>
+              </div>
+              <div className="bg-white/5 rounded-lg p-4">
+                <p className="text-xs text-gray-400">Artist Loyalty</p>
+                <p className="text-xl font-bold text-white">{Math.round(insights.listening_insights.artist_loyalty * 100)}%</p>
+              </div>
+              <div className="bg-white/5 rounded-lg p-4">
+                <p className="text-xs text-gray-400">Mainstream Index</p>
+                <p className="text-xl font-bold text-white">{Math.round(insights.listening_insights.mainstream_index * 100)}%</p>
+              </div>
             </div>
           )}
         </GlassCard>
 
         <GlassCard>
-          <h3 className="text-lg font-semibold text-white mb-4">Listening Statistics</h3>
-          <div className="space-y-4">
-            <div className="bg-gradient-to-r from-purple-500/20 to-pink-500/20 rounded-lg p-4">
-              <div className="flex items-center gap-3">
-                <Music className="w-6 h-6 text-purple-400" />
-                <div>
-                  <p className="text-sm text-gray-300">Tracks Analyzed</p>
-                  <p className="text-2xl font-bold text-white">{userProfile?.total_tracks_analyzed || 0}</p>
-                </div>
-              </div>
+          <h3 className="text-lg font-semibold text-white mb-4">Your Sound Profile</h3>
+          {insightsLoading ? (
+            <div className="flex items-center justify-center h-40">
+              <Loader2 className="w-8 h-8 animate-spin text-green-500" />
             </div>
-
-            <div className="bg-gradient-to-r from-green-500/20 to-emerald-500/20 rounded-lg p-4">
-              <div className="flex items-center gap-3">
-                <TrendingUp className="w-6 h-6 text-green-400" />
-                <div>
-                  <p className="text-sm text-gray-300">Top Tracks ({timeRanges.find(r => r.id === timeRange)?.label})</p>
-                  <p className="text-2xl font-bold text-white">{topTracks.length}</p>
-                </div>
-              </div>
+          ) : insightsError || !insights?.sound_profile?.genre_breakdown?.length ? (
+            <div className="text-center py-10">
+              <p className="text-sm text-gray-400">No genre breakdown available</p>
             </div>
-
-            <div className="bg-gradient-to-r from-blue-500/20 to-cyan-500/20 rounded-lg p-4">
-              <div className="flex items-center gap-3">
-                <BarChart3 className="w-6 h-6 text-blue-400" />
-                <div>
-                  <p className="text-sm text-gray-300">Average Tempo</p>
-                  <p className="text-2xl font-bold text-white">{Math.round(userProfile?.avg_features.tempo || 120)} BPM</p>
+          ) : (
+            <div className="space-y-3">
+              {insights.sound_profile.genre_breakdown.map((g) => (
+                <div key={g.genre}>
+                  <div className="flex items-center justify-between text-sm mb-1">
+                    <span className="text-gray-300">{g.genre}</span>
+                    <span className="text-gray-400">{g.percentage}%</span>
+                  </div>
+                  <div className="w-full h-2 rounded-full bg-white/10">
+                    <div
+                      className="h-2 rounded-full bg-gradient-to-r from-purple-500 to-green-400"
+                      style={{ width: `${Math.max(2, Math.min(100, g.percentage))}%` }}
+                    />
+                  </div>
                 </div>
-              </div>
+              ))}
             </div>
-          </div>
+          )}
         </GlassCard>
       </div>
+
+      <GlassCard>
+        <h3 className="text-lg font-semibold text-white mb-4">Hidden Gems</h3>
+        {insightsLoading ? (
+          <div className="flex items-center justify-center h-24">
+            <Loader2 className="w-6 h-6 animate-spin text-green-500" />
+          </div>
+        ) : insightsError || !insights?.hidden_gems?.length ? (
+          <p className="text-sm text-gray-400">No hidden gems found right now.</p>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+            {insights.hidden_gems.slice(0, 5).map((track) => (
+              <div key={track.id} className="flex items-center gap-3 p-3 bg-white/5 rounded-lg">
+                <div className="w-12 h-12 rounded-lg overflow-hidden bg-white/10 flex-shrink-0">
+                  {track.album_image_url ? (
+                    <img src={track.album_image_url} alt={`${track.name} cover`} className="w-full h-full object-cover" />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center">
+                      <Music className="w-5 h-5 text-gray-400" />
+                    </div>
+                  )}
+                </div>
+                <div className="min-w-0">
+                  <p className="text-sm text-white font-medium truncate">{track.name}</p>
+                  <p className="text-xs text-gray-400 truncate">{track.artists.join(', ')}</p>
+                  <p className="text-xs text-green-400">Popularity {track.popularity}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </GlassCard>
 
       <GlassCard>
         <h3 className="text-lg font-semibold text-white mb-4">
@@ -813,6 +1095,19 @@ const AnalyticsTab = ({ token, userProfile }: { token: string; userProfile: User
               <div key={track.id} className="flex items-center gap-3 p-3 bg-white/5 rounded-lg">
                 <div className="w-8 h-8 bg-gradient-to-br from-green-500 to-green-600 rounded-lg flex items-center justify-center">
                   <span className="text-white font-bold text-sm">#{index + 1}</span>
+                </div>
+                <div className="w-12 h-12 rounded-lg overflow-hidden bg-white/10 flex-shrink-0">
+                  {getTopTrackAlbumImage(track) ? (
+                    <img
+                      src={getTopTrackAlbumImage(track)!}
+                      alt={`${track.name} album cover`}
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center">
+                      <Music className="w-5 h-5 text-gray-400" />
+                    </div>
+                  )}
                 </div>
                 <div className="flex-1 min-w-0">
                   <h4 className="font-medium text-white truncate">{track.name}</h4>
@@ -852,338 +1147,212 @@ const AnalyticsTab = ({ token, userProfile }: { token: string; userProfile: User
 
 // PLAYLISTS TAB COMPONENT
 const PlaylistsTab = ({ token }: { token: string }) => {
-  const [playlists, setPlaylists] = useState<SavedPlaylist[]>([]);
-  const [selectedPlaylist, setSelectedPlaylist] = useState<any>(null);
-  const [isLoading, setIsLoading] = useState(false);
-  const [showExportModal, setShowExportModal] = useState<number | null>(null);
-  const [exportName, setExportName] = useState('');
-  const [exportDescription, setExportDescription] = useState('');
+  const [prompt, setPrompt] = useState('');
+  const [playlistTitle, setPlaylistTitle] = useState('');
+  const [tracks, setTracks] = useState<Array<{
+    track_id: string;
+    name: string;
+    artist: string;
+    artists?: string[];
+    album?: string;
+    album_cover_url?: string | null;
+    album_images?: Array<{ url: string; width?: number; height?: number }>;
+    spotify_url: string;
+  }>>([]);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
+  const [error, setError] = useState('');
+  const [exportedUrl, setExportedUrl] = useState('');
 
-  useEffect(() => {
-    if (token) {
-      loadPlaylists();
+  const quickPrompts = [
+    { label: 'Chill', prompt: 'Chill evening unwind' },
+    { label: 'Workout', prompt: 'Gym trap workout energy' },
+    { label: 'Party', prompt: 'Party dance bangers' },
+    { label: 'Focus', prompt: 'Focus deep work flow' },
+    { label: 'Late Night', prompt: 'Late night drive' },
+  ];
+
+  const handleGenerate = async (promptOverride?: string) => {
+    const activePrompt = (promptOverride || prompt).trim();
+    if (!activePrompt) {
+      setError('Enter a vibe or prompt to generate a playlist.');
+      return;
     }
-  }, [token]);
 
-  const loadPlaylists = async () => {
-    setIsLoading(true);
+    setIsGenerating(true);
+    setError('');
+    setExportedUrl('');
+
     try {
-      const response = await fetch(`${API_BASE}/api/playlists/my-playlists`, {
-        headers: { 'Authorization': `Bearer ${token}` },
+      const response = await fetch(`${API_BASE}/api/playlists/generate`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ prompt: activePrompt, limit: 30 }),
       });
       const data = await response.json();
-      setPlaylists(data || []);
-    } catch (error) {
-      console.error('Error loading playlists:', error);
-    } finally {
-      setIsLoading(false);
-    }
-  };
 
-  const loadPlaylistDetails = async (playlistId: number) => {
-    try {
-      const response = await fetch(`${API_BASE}/api/playlists/${playlistId}`, {
-        headers: { 'Authorization': `Bearer ${token}` },
-      });
-      const data = await response.json();
-      setSelectedPlaylist(data);
-    } catch (error) {
-      console.error('Error loading playlist details:', error);
-    }
-  };
-
-  const deletePlaylist = async (playlistId: number) => {
-    if (!confirm('Are you sure you want to delete this playlist?')) return;
-
-    try {
-      await fetch(`${API_BASE}/api/playlists/${playlistId}`, {
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` },
-      });
-
-      loadPlaylists();
-
-      if (selectedPlaylist?.id === playlistId) {
-        setSelectedPlaylist(null);
+      if (!response.ok) {
+        throw new Error(data.detail || 'Playlist generation failed');
       }
-    } catch (error) {
-      console.error('Error deleting playlist:', error);
-      alert('Failed to delete playlist');
+
+      setPrompt(activePrompt);
+      setPlaylistTitle(data.playlist_title || `${activePrompt} — curated by BlessedEar`);
+      setTracks(coerceGeneratedTracks(data.tracks));
+    } catch (err: any) {
+      setError(err?.message || 'Playlist generation failed');
+      setTracks([]);
+      setPlaylistTitle('');
+    } finally {
+      setIsGenerating(false);
     }
   };
 
-  const exportToSpotify = async (playlistId: number) => {
+  const handleExport = async () => {
+    if (!tracks.length || !prompt.trim()) return;
+    setIsExporting(true);
+    setError('');
+
     try {
-      const response = await fetch(`${API_BASE}/api/playlists/${playlistId}/export-to-spotify`, {
+      const response = await fetch(`${API_BASE}/api/playlists/export`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          playlist_id: playlistId,
-          spotify_name: exportName,
-          spotify_description: exportDescription,
+          prompt,
+          tracks,
         }),
       });
-
       const data = await response.json();
-
-      if (response.ok) {
-        alert(`Playlist exported to Spotify successfully! ${data.track_count} tracks added.`);
-        loadPlaylists();
-        setShowExportModal(null);
-        setExportName('');
-        setExportDescription('');
-      } else {
-        alert(`Export failed: ${data.detail}`);
+      if (!response.ok) {
+        throw new Error(data.detail || 'Spotify export failed');
       }
-    } catch (error) {
-      console.error('Error exporting to Spotify:', error);
-      alert('Failed to export playlist to Spotify');
+      setExportedUrl(data.spotify_url || '');
+    } catch (err: any) {
+      setError(err?.message || 'Spotify export failed');
+    } finally {
+      setIsExporting(false);
     }
-  };
-
-  const formatDate = (dateString: string) => {
-    return new Date(dateString).toLocaleDateString('en-US', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
-  };
-
-  const getMoodColor = (mood?: string) => {
-    const colors = {
-      happy: 'from-yellow-500 to-orange-500',
-      energetic: 'from-red-500 to-pink-500',
-      chill: 'from-blue-500 to-cyan-500',
-      focus: 'from-purple-500 to-indigo-500',
-      sad: 'from-gray-500 to-blue-500',
-      party: 'from-green-500 to-emerald-500',
-    };
-    return colors[mood as keyof typeof colors] || 'from-gray-500 to-gray-600';
   };
 
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-2xl font-bold text-white mb-2">Your Playlists</h2>
-        <p className="text-gray-300">Manage your saved AI-generated playlists and export them to Spotify</p>
+        <h2 className="text-2xl font-bold text-white mb-2">AI Playlist Generator</h2>
+        <p className="text-gray-300">Generate AI playlists instantly based on your vibe.</p>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Playlists List */}
-        <GlassCard>
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-semibold text-white">Saved Playlists</h3>
-            <span className="text-sm text-gray-400">{playlists.length} total</span>
+      <GlassCard>
+        <h3 className="text-lg font-semibold text-white mb-4">Playlist Generator</h3>
+        <div className="flex flex-col md:flex-row gap-3">
+          <input
+            type="text"
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            placeholder="Describe your vibe (e.g. late night drive, sad indie, gym trap)..."
+            className="flex-1 bg-white/5 border border-white/20 text-white placeholder:text-gray-500 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-green-500/40"
+          />
+          <button
+            onClick={() => handleGenerate()}
+            disabled={isGenerating}
+            className="bg-gradient-to-r from-green-500 to-green-400 text-white px-6 py-3 rounded-xl font-medium hover:scale-[1.02] transition-all disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+          >
+            {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+            Generate Playlist
+          </button>
+        </div>
+
+        <div className="mt-4 flex flex-wrap gap-2">
+          {quickPrompts.map((item) => (
+            <button
+              key={item.label}
+              onClick={() => handleGenerate(item.prompt)}
+              className="text-sm px-3 py-1.5 rounded-full border border-white/20 text-gray-200 hover:bg-white/10 transition-colors"
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      </GlassCard>
+
+      <GlassCard>
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h3 className="text-lg font-semibold text-white">Generated Playlist Preview</h3>
+            {playlistTitle ? <p className="text-sm text-gray-400 mt-1">{playlistTitle}</p> : null}
           </div>
-
-          {isLoading ? (
-            <div className="text-center py-8">
-              <Loader2 className="w-8 h-8 animate-spin text-green-500 mx-auto" />
-            </div>
-          ) : playlists.length > 0 ? (
-            <div className="space-y-3 max-h-96 overflow-y-auto">
-              {playlists.map((playlist) => (
-                <div
-                  key={playlist.id}
-                  className={`p-4 rounded-xl border-2 transition-all duration-200 cursor-pointer ${
-                    selectedPlaylist?.id === playlist.id
-                      ? 'border-green-500 bg-green-500/10'
-                      : 'border-white/20 hover:border-white/40 hover:bg-white/5'
-                  }`}
-                  onClick={() => loadPlaylistDetails(playlist.id)}
-                >
-                  <div className="flex items-start justify-between">
-                    <div className="flex-1 min-w-0">
-                      <h4 className="font-medium text-white truncate">{playlist.name}</h4>
-                      <div className="flex items-center gap-2 mt-1">
-                        <Hash className="w-3 h-3 text-gray-400" />
-                        <span className="text-xs text-gray-400">{playlist.track_count} tracks</span>
-                        {playlist.mood && (
-                          <>
-                            <span className="text-gray-500">•</span>
-                            <span className={`text-xs px-2 py-1 rounded-full bg-gradient-to-r ${getMoodColor(playlist.mood)} text-white`}>
-                              {playlist.mood}
-                            </span>
-                          </>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-1 mt-1">
-                        <Calendar className="w-3 h-3 text-gray-400" />
-                        <span className="text-xs text-gray-400">{formatDate(playlist.created_at)}</span>
-                        {playlist.is_exported && (
-                          <span className="ml-2 text-xs px-2 py-1 bg-green-500/20 text-green-400 rounded-full">
-                            Exported
-                          </span>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-2 ml-2">
-                      {!playlist.is_exported && (
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setExportName(playlist.name);
-                            setExportDescription(playlist.description || '');
-                            setShowExportModal(playlist.id);
-                          }}
-                          className="w-8 h-8 rounded-full bg-green-500/20 flex items-center justify-center hover:bg-green-500/30 transition-colors"
-                          title="Export to Spotify"
-                        >
-                          <Download className="w-4 h-4 text-green-400" />
-                        </button>
-                      )}
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          deletePlaylist(playlist.id);
-                        }}
-                        className="w-8 h-8 rounded-full bg-red-500/20 flex items-center justify-center hover:bg-red-500/30 transition-colors"
-                        title="Delete playlist"
-                      >
-                        <Trash2 className="w-4 h-4 text-red-400" />
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="text-center py-8">
-              <Music className="w-12 h-12 text-gray-400 mx-auto mb-4" />
-              <p className="text-gray-400 mb-4">No saved playlists yet</p>
-              <p className="text-sm text-gray-500">Generate some recommendations and save them as playlists!</p>
-            </div>
-          )}
-        </GlassCard>
-
-        {/* Playlist Details */}
-        <GlassCard>
-          <h3 className="text-lg font-semibold text-white mb-4">Playlist Details</h3>
-
-          {selectedPlaylist ? (
-            <div className="space-y-4">
-              <div>
-                <h4 className="text-xl font-bold text-white">{selectedPlaylist.name}</h4>
-                {selectedPlaylist.description && (
-                  <p className="text-gray-300 mt-1">{selectedPlaylist.description}</p>
-                )}
-                <div className="flex items-center gap-2 mt-2">
-                  <span className="text-sm text-gray-400">{selectedPlaylist.tracks?.length || 0} tracks</span>
-                  {selectedPlaylist.mood && (
-                    <>
-                      <span className="text-gray-500">•</span>
-                      <span className={`text-xs px-2 py-1 rounded-full bg-gradient-to-r ${getMoodColor(selectedPlaylist.mood)} text-white`}>
-                        {selectedPlaylist.mood} mood
-                      </span>
-                    </>
-                  )}
-                </div>
-              </div>
-
-              <div className="space-y-2 max-h-64 overflow-y-auto">
-                {selectedPlaylist.tracks?.map((track: any, index: number) => (
-                  <div key={track.id || index} className="flex items-center gap-3 p-2 bg-white/5 rounded-lg">
-                    <span className="text-xs text-gray-400 w-6">{index + 1}</span>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-white truncate">{track.name}</p>
-                      <p className="text-xs text-gray-400 truncate">{track.artists?.join(', ')}</p>
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              {!selectedPlaylist.is_exported && (
-                <button
-                  onClick={() => {
-                    setExportName(selectedPlaylist.name);
-                    setExportDescription(selectedPlaylist.description || '');
-                    setShowExportModal(selectedPlaylist.id);
-                  }}
-                  className="w-full bg-green-500 text-white py-3 rounded-lg hover:bg-green-600 transition-colors flex items-center justify-center gap-2"
-                >
-                  <Download className="w-4 h-4" />
-                  Export to Spotify
-                </button>
-              )}
-
-              {selectedPlaylist.is_exported && selectedPlaylist.spotify_playlist_id && (
-                <a
-                  href={`https://open.spotify.com/playlist/${selectedPlaylist.spotify_playlist_id}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="w-full bg-green-500/20 border border-green-500/30 text-green-400 py-3 rounded-lg hover:bg-green-500/30 transition-colors flex items-center justify-center gap-2"
-                >
-                  <ExternalLink className="w-4 h-4" />
-                  Open in Spotify
-                </a>
-              )}
-            </div>
-          ) : (
-            <div className="text-center py-8">
-              <p className="text-gray-400">Select a playlist to view details</p>
-            </div>
-          )}
-        </GlassCard>
-      </div>
-
-      {/* Export Modal */}
-      {showExportModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-gray-800 p-6 rounded-2xl max-w-md w-full mx-4">
-            <h3 className="text-lg font-semibold text-white mb-4">Export to Spotify</h3>
-
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm text-gray-300 mb-2">Playlist Name</label>
-                <input
-                  type="text"
-                  value={exportName}
-                  onChange={(e) => setExportName(e.target.value)}
-                  className="w-full bg-gray-700 text-white rounded-lg px-3 py-2 border border-gray-600 focus:border-green-500 focus:outline-none"
-                  placeholder="Enter playlist name"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm text-gray-300 mb-2">Description (Optional)</label>
-                <textarea
-                  value={exportDescription}
-                  onChange={(e) => setExportDescription(e.target.value)}
-                  className="w-full bg-gray-700 text-white rounded-lg px-3 py-2 border border-gray-600 focus:border-green-500 focus:outline-none"
-                  placeholder="Enter description"
-                  rows={3}
-                />
-              </div>
-            </div>
-
-            <div className="flex gap-3 mt-6">
+          <div className="flex items-center gap-2">
+            {tracks.length > 0 && (
               <button
-                onClick={() => {
-                  setShowExportModal(null);
-                  setExportName('');
-                  setExportDescription('');
-                }}
-                className="flex-1 bg-gray-600 text-white py-2 rounded-lg hover:bg-gray-500 transition-colors"
+                onClick={() => handleGenerate()}
+                disabled={isGenerating}
+                className="px-3 py-2 rounded-lg border border-white/20 text-gray-200 hover:bg-white/10 transition-colors disabled:opacity-60"
               >
-                Cancel
+                Regenerate Playlist
               </button>
-              <button
-                onClick={() => exportToSpotify(showExportModal)}
-                disabled={!exportName.trim()}
-                className="flex-1 bg-green-500 text-white py-2 rounded-lg hover:bg-green-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                Export
-              </button>
-            </div>
+            )}
+            <button
+              onClick={handleExport}
+              disabled={!tracks.length || isExporting}
+              className="px-4 py-2 rounded-lg bg-green-500 text-white hover:bg-green-600 transition-colors disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-2"
+            >
+              {isExporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <ExternalLink className="w-4 h-4" />}
+              Save to Spotify
+            </button>
           </div>
         </div>
-      )}
+
+        {error ? <p className="text-sm text-rose-300 mb-3">{error}</p> : null}
+        {exportedUrl ? (
+          <a
+            href={exportedUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-sm text-green-300 hover:text-green-200 mb-3 inline-flex items-center gap-1"
+          >
+            Playlist exported successfully — open in Spotify
+            <ExternalLink className="w-3 h-3" />
+          </a>
+        ) : null}
+
+        {tracks.length === 0 ? (
+          <div className="text-center py-10 text-gray-400">
+            Enter a prompt or tap a quick mood to generate a 20–40 track playlist.
+          </div>
+        ) : (
+          <div className="max-h-[30rem] overflow-y-auto space-y-2 pr-1">
+            {tracks.map((track, index) => (
+              <div key={`${track.track_id}-${index}`} className="flex items-center gap-3 p-3 bg-white/5 rounded-lg">
+                <div className="w-12 h-12 rounded-lg overflow-hidden bg-white/10 flex-shrink-0">
+                  {track.album_cover_url ? (
+                    <img src={track.album_cover_url} alt={`${track.name} cover`} className="w-full h-full object-cover" />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center">
+                      <Music className="w-5 h-5 text-gray-400" />
+                    </div>
+                  )}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-white truncate">{track.name}</p>
+                  <p className="text-xs text-gray-400 truncate">{track.artist}</p>
+                </div>
+                <a
+                  href={track.spotify_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center hover:bg-green-500/20 transition-colors"
+                >
+                  <ExternalLink className="w-4 h-4 text-gray-300" />
+                </a>
+              </div>
+            ))}
+          </div>
+        )}
+      </GlassCard>
     </div>
   );
 };
@@ -1199,6 +1368,9 @@ export default function DashboardLayout() {
   const [playlistName, setPlaylistName] = useState('');
   const [playlistDescription, setPlaylistDescription] = useState('');
   const [currentMood, setCurrentMood] = useState<string | null>(null);
+  const [tasteProfile, setTasteProfile] = useState<TasteProfile | null>(null);
+  const [tasteProfileLoading, setTasteProfileLoading] = useState(false);
+  const [tasteProfileError, setTasteProfileError] = useState(false);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -1224,6 +1396,9 @@ export default function DashboardLayout() {
             setUserProfile(null);
             setCurrentUser(null);
             setRecommendations([]);
+            setTasteProfile(null);
+            setTasteProfileError(false);
+            setTasteProfileLoading(false);
 
             sessionStorage.setItem('access_token', data.access_token);
             setToken(data.access_token);
@@ -1253,24 +1428,54 @@ export default function DashboardLayout() {
     if (!token) return;
 
     setIsLoading(true);
+    setTasteProfileLoading(true);
+    setTasteProfileError(false);
+    setTasteProfile(null);
     try {
       const [profile, user] = await Promise.all([
         getUserProfile(token),
-        getCurrentUser(token)
+        getCurrentUser(token),
       ]);
 
       setUserProfile(profile);
       setCurrentUser(user);
 
       if (profile) {
-        const recs = await generateRecommendations(token, { limit: 8 });
+        const recs = await generateRecommendations(token, { limit: 20 });
         setRecommendations(recs);
       }
+
+      // Defer taste profile until core dashboard content is loaded.
+      window.setTimeout(() => {
+        void loadTasteProfile(token);
+      }, 400);
     } catch (error) {
       console.error('Error loading user data:', error);
+      setTasteProfileLoading(false);
+      setTasteProfileError(true);
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const loadTasteProfile = async (tokenOverride?: string) => {
+    const activeToken = tokenOverride || token;
+    if (!activeToken) return;
+
+    setTasteProfileLoading(true);
+    setTasteProfileError(false);
+    setTasteProfile(null);
+
+    const result = await fetchTasteProfile(activeToken);
+    if (result) {
+      setTasteProfile(result);
+      if (process.env.NODE_ENV !== 'production') {
+        console.debug('[TasteProfile] payload', result);
+      }
+    } else {
+      setTasteProfileError(true);
+    }
+    setTasteProfileLoading(false);
   };
 
   const handleGenerateRecommendations = async () => {
@@ -1279,25 +1484,10 @@ export default function DashboardLayout() {
     setIsLoading(true);
     setCurrentMood(null);
     try {
-      const recs = await generateRecommendations(token, { limit: 8 });
+      const recs = await generateRecommendations(token, { limit: 20 });
       setRecommendations(recs);
     } catch (error) {
       console.error('Error generating recommendations:', error);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handleGenerateMoodPlaylist = async (mood: string) => {
-    if (!token) return;
-
-    setIsLoading(true);
-    setCurrentMood(mood);
-    try {
-      const recs = await generateMoodPlaylist(token, mood);
-      setRecommendations(recs);
-    } catch (error) {
-      console.error('Error generating mood playlist:', error);
     } finally {
       setIsLoading(false);
     }
@@ -1372,10 +1562,13 @@ export default function DashboardLayout() {
           {activeTab === 'dashboard' && (
             <DashboardContent
               userProfile={userProfile}
+              tasteProfile={tasteProfile}
+              isTasteProfileLoading={tasteProfileLoading}
+              tasteProfileError={tasteProfileError}
+              onRetryTasteProfile={() => token && loadTasteProfile(token)}
               recommendations={recommendations}
               isLoading={isLoading}
               onGenerateRecommendations={handleGenerateRecommendations}
-              onGenerateMoodPlaylist={handleGenerateMoodPlaylist}
               onSavePlaylist={openSaveModal}
             />
           )}
