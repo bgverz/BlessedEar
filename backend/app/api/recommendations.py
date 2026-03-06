@@ -1,6 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
+import asyncio
+import logging
+import time
 import spotipy
 
 from app.api.auth import get_current_user, get_valid_access_token
@@ -9,6 +12,7 @@ from app.ml.recommender import RecommendationEngine
 
 router = APIRouter()
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 class RecommendationRequest(BaseModel):
     seed_tracks: Optional[List[str]] = None
@@ -25,6 +29,23 @@ class RecommendationResponse(BaseModel):
     generation_time: Optional[float] = None
 
 recommendation_engine = RecommendationEngine()
+
+
+def _normalize_top_track(track: Dict[str, Any]) -> Dict[str, Any]:
+    album = track.get("album") or {}
+    album_images = album.get("images") or []
+    album_image_url = recommendation_engine._select_album_image_url(album_images)
+    return {
+        "id": track.get("id"),
+        "name": track.get("name"),
+        "artists": track.get("artists", []),
+        "album": album,
+        "album_images": album_images,
+        "album_image_url": album_image_url,
+        "popularity": track.get("popularity", 0),
+        "preview_url": track.get("preview_url"),
+        "external_urls": track.get("external_urls", {}),
+    }
 
 
 async def _require_access_token(current_user: dict) -> str:
@@ -178,7 +199,8 @@ async def get_user_top_tracks(
             limit=limit
         )
 
-        return {"top_tracks": top_tracks, "time_range": time_range}
+        normalized_tracks = [_normalize_top_track(track) for track in top_tracks]
+        return {"top_tracks": normalized_tracks, "time_range": time_range}
 
     except HTTPException:
         raise
@@ -230,6 +252,99 @@ async def discover_music(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error discovering music: {str(e)}")
+
+
+@router.get("/dna")
+async def get_music_dna(current_user: dict = Depends(get_current_user)):
+    """
+    Return the current user's Music DNA: six normalized dimensions (0–1) derived
+    from their top artists' genre tags, track popularity, and release era.
+
+    Does NOT use the restricted /v1/audio-features endpoint.
+    Result is cached per Spotify user ID for 20 minutes.
+    """
+    spotify_id = current_user.get("spotify_id", "unknown")
+    cache_key = f"dna:{spotify_id}"
+    request_started = time.perf_counter()
+    logger.info("Music DNA request started for spotify_id=%s cache_key=%s", spotify_id, cache_key)
+    try:
+        access_token = await _require_access_token(current_user)
+        dna = await asyncio.wait_for(
+            recommendation_engine.build_music_dna(
+                spotify_id=spotify_id,
+                access_token=access_token,
+            ),
+            timeout=28.0,
+        )
+        if dna.get("status") in {"degraded", "fallback"}:
+            logger.warning(
+                "Music DNA fallback response for spotify_id=%s status=%s reasons=%s",
+                spotify_id,
+                dna.get("status"),
+                dna.get("metadata", {}).get("fallback_reasons", []),
+            )
+        logger.info(
+            "Music DNA payload spotify_id=%s status=%s dimensions=%s",
+            spotify_id,
+            dna.get("status"),
+            dna.get("dimensions"),
+        )
+        return dna
+    except asyncio.TimeoutError:
+        logger.warning("Music DNA request timed out for spotify_id=%s", spotify_id)
+        return {
+            "spotify_id": spotify_id,
+            "status": "timeout",
+            "dimensions": {
+                "energy": 0.5,
+                "valence": 0.5,
+                "danceability": 0.5,
+                "acousticness": 0.5,
+                "speechiness": 0.5,
+                "diversity": 0.0,
+            },
+            "metadata": {
+                "total_artists_analyzed": 0,
+                "total_tracks_analyzed": 0,
+                "unique_genres": [],
+                "avg_popularity": 0.5,
+                "avg_era": 0.5,
+                "source": "timeout-fallback",
+                "fallback_reasons": ["endpoint_timeout"],
+            },
+            "source": "timeout-fallback",
+            "error": "Music DNA timed out",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Music DNA request failed for spotify_id=%s", spotify_id)
+        return {
+            "spotify_id": spotify_id,
+            "status": "error",
+            "dimensions": {
+                "energy": 0.5,
+                "valence": 0.5,
+                "danceability": 0.5,
+                "acousticness": 0.5,
+                "speechiness": 0.5,
+                "diversity": 0.0,
+            },
+            "metadata": {
+                "total_artists_analyzed": 0,
+                "total_tracks_analyzed": 0,
+                "unique_genres": [],
+                "avg_popularity": 0.5,
+                "avg_era": 0.5,
+                "source": "error-fallback",
+                "fallback_reasons": [str(type(e).__name__)],
+            },
+            "source": "error-fallback",
+            "error": "Error computing Music DNA",
+        }
+    finally:
+        elapsed_ms = round((time.perf_counter() - request_started) * 1000, 1)
+        logger.info("Music DNA request completed for spotify_id=%s duration_ms=%s", spotify_id, elapsed_ms)
 
 
 @router.get("/genres")

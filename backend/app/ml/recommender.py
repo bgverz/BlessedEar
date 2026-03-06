@@ -50,6 +50,48 @@ class RecommendationEngine:
         """Return an authenticated Spotify client."""
         return spotipy.Spotify(auth=access_token)
 
+    async def _spotify_call_with_timeout(
+        self,
+        func,
+        *args,
+        timeout_seconds: float = 6.0,
+        call_name: str = "spotify_call",
+        **kwargs,
+    ):
+        """
+        Run a blocking Spotipy call in a worker thread with a hard timeout.
+        """
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(func, *args, **kwargs),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Spotify call timed out after %.1fs: %s",
+                timeout_seconds,
+                call_name,
+            )
+            raise
+
+    @staticmethod
+    def _select_album_image_url(album_images: Optional[List[Dict[str, Any]]]) -> Optional[str]:
+        """
+        Pick a stable album thumbnail URL, preferring ~300px then ~64px.
+        """
+        if not album_images:
+            return None
+
+        valid_images = [img for img in album_images if isinstance(img, dict) and img.get("url")]
+        if not valid_images:
+            return None
+
+        by_300 = sorted(valid_images, key=lambda img: abs((img.get("width") or 300) - 300))
+        if by_300:
+            return by_300[0].get("url")
+
+        return valid_images[0].get("url")
+
     # ------------------------------------------------------------------
     # Audio features
     # ------------------------------------------------------------------
@@ -165,8 +207,17 @@ class RecommendationEngine:
     async def get_user_top_tracks(self, sp: spotipy.Spotify, time_range: str = "medium_term", limit: int = 50):
         """Get user's top tracks for a given time range."""
         try:
-            results = sp.current_user_top_tracks(time_range=time_range, limit=min(limit, 50))
+            results = await self._spotify_call_with_timeout(
+                sp.current_user_top_tracks,
+                time_range=time_range,
+                limit=min(limit, 50),
+                timeout_seconds=10.0,
+                call_name=f"current_user_top_tracks[{time_range}]",
+            )
             return results['items']
+        except asyncio.TimeoutError:
+            logger.warning("Timeout getting top tracks (%s)", time_range)
+            return []
         except Exception as e:
             logger.warning(f"Error getting top tracks ({time_range}): {e}")
             return []
@@ -323,6 +374,7 @@ class RecommendationEngine:
                             'artists': [a['name'] for a in track['artists']],
                             'album': album['name'],
                             'album_images': album.get('images', []),
+                            'album_image_url': self._select_album_image_url(album.get('images', [])),
                             'preview_url': track.get('preview_url'),
                             'external_urls': track.get('external_urls', {}),
                             'similarity_score': round(random.uniform(0.85, 0.95), 2),
@@ -353,6 +405,7 @@ class RecommendationEngine:
                         'artists': [a['name'] for a in track['artists']],
                         'album': album_info['name'],
                         'album_images': album_info.get('images', []),
+                        'album_image_url': self._select_album_image_url(album_info.get('images', [])),
                         'preview_url': track.get('preview_url'),
                         'external_urls': track.get('external_urls', {}),
                         'similarity_score': round(random.uniform(0.80, 0.90), 2),
@@ -486,6 +539,7 @@ class RecommendationEngine:
                     'artists': [a['name'] for a in track['artists']],
                     'album': track['album']['name'],
                     'album_images': track['album'].get('images', []),
+                    'album_image_url': self._select_album_image_url(track['album'].get('images', [])),
                     'preview_url': track.get('preview_url'),
                     'external_urls': track.get('external_urls', {}),
                     'similarity_score': round(random.uniform(0.78, 0.95), 2),
@@ -574,6 +628,240 @@ class RecommendationEngine:
         except Exception as e:
             logger.error(f"Error building user profile: {e}")
             return {"error": str(e)}
+
+    async def build_music_dna(self, spotify_id: str, access_token: str) -> Dict:
+        """
+        Build a Music DNA payload WITHOUT using the restricted /v1/audio-features endpoint.
+
+        Data sources (all confirmed working):
+        - current_user_top_artists  → genre tags, artist popularity
+        - current_user_top_tracks   → track popularity, release year, explicit flag
+
+        Six dimensions (each normalized 0.0–1.0):
+          energy        — high for rock/metal/edm; low for classical/ambient/folk
+          valence       — high for pop/happy/summer; low for sad/emo/dark
+          danceability  — high for dance/hip-hop/funk; low for classical/folk
+          acousticness  — high for acoustic/folk/classical; low for electronic/edm
+          speechiness   — high for hip-hop/rap/drill; low for instrumental/classical
+          diversity     — unique genre count normalised (max ~30 genres → 1.0)
+
+        Result cached per-user for 20 min (key: dna:{spotify_id}).
+        """
+        cache_key = f"dna:{spotify_id}"
+        logger.info("Music DNA cache lookup spotify_id=%s cache_key=%s", spotify_id, cache_key)
+        cached = await get_cache(cache_key)
+        if cached:
+            try:
+                cached_payload = json.loads(cached)
+                if isinstance(cached_payload, dict) and "status" not in cached_payload:
+                    cached_payload["status"] = "ok"
+                logger.info(
+                    "Music DNA cache hit spotify_id=%s cache_key=%s status=%s dimensions=%s",
+                    spotify_id,
+                    cache_key,
+                    cached_payload.get("status"),
+                    cached_payload.get("dimensions"),
+                )
+                return cached_payload
+            except Exception:
+                pass
+
+        try:
+            sp = await self.get_spotify_client(access_token)
+            fallback_conditions: List[str] = []
+
+            # --- Collect top artists across all time ranges ---
+            artists: List[Dict] = []
+            seen_artist_ids: Set[str] = set()
+            for time_range in ('short_term', 'medium_term', 'long_term'):
+                try:
+                    result = await self._spotify_call_with_timeout(
+                        sp.current_user_top_artists,
+                        time_range=time_range,
+                        limit=20,
+                        timeout_seconds=10.0,
+                        call_name=f"current_user_top_artists[{time_range}]",
+                    )
+                    for a in result.get('items', []):
+                        aid = a.get('id')
+                        if aid and aid not in seen_artist_ids:
+                            artists.append(a)
+                            seen_artist_ids.add(aid)
+                except asyncio.TimeoutError:
+                    fallback_conditions.append(f"top_artists_timeout:{time_range}")
+                    logger.warning("Top artists (%s) timed out for user %s", time_range, spotify_id)
+                except Exception as exc:
+                    fallback_conditions.append(f"top_artists_error:{time_range}")
+                    logger.debug("Top artists (%s) skipped: %s", time_range, exc)
+
+            # --- Collect top tracks across all time ranges ---
+            tracks: List[Dict] = []
+            seen_track_ids: Set[str] = set()
+            for time_range in ('short_term', 'medium_term', 'long_term'):
+                try:
+                    result = await self._spotify_call_with_timeout(
+                        sp.current_user_top_tracks,
+                        time_range=time_range,
+                        limit=50,
+                        timeout_seconds=10.0,
+                        call_name=f"current_user_top_tracks[{time_range}]",
+                    )
+                    for t in result.get('items', []):
+                        tid = t.get('id')
+                        if tid and tid not in seen_track_ids:
+                            tracks.append(t)
+                            seen_track_ids.add(tid)
+                except asyncio.TimeoutError:
+                    fallback_conditions.append(f"top_tracks_timeout:{time_range}")
+                    logger.warning("Top tracks (%s) timed out for user %s", time_range, spotify_id)
+                except Exception as exc:
+                    fallback_conditions.append(f"top_tracks_error:{time_range}")
+                    logger.debug("Top tracks (%s) skipped: %s", time_range, exc)
+
+            if not artists and not tracks:
+                logger.warning(
+                    "Music DNA fallback: no Spotify data available for %s (conditions=%s)",
+                    spotify_id,
+                    fallback_conditions,
+                )
+                return {
+                    "spotify_id": spotify_id,
+                    "status": "fallback",
+                    "dimensions": {
+                        "energy": 0.5,
+                        "valence": 0.5,
+                        "danceability": 0.5,
+                        "acousticness": 0.5,
+                        "speechiness": 0.5,
+                        "diversity": 0.0,
+                    },
+                    "metadata": {
+                        "total_artists_analyzed": 0,
+                        "total_tracks_analyzed": 0,
+                        "unique_genres": [],
+                        "avg_popularity": 0.5,
+                        "avg_era": 0.5,
+                        "source": "fallback",
+                        "fallback_reasons": fallback_conditions,
+                    },
+                    "source": "fallback",
+                    "error": "No Spotify data available — connect Spotify and try again",
+                }
+
+            # --- Build genre corpus ---
+            all_genres: List[str] = []
+            for artist in artists:
+                all_genres.extend(artist.get('genres', []))
+
+            unique_genres: Set[str] = set(all_genres)
+            genre_text: str = ' '.join(all_genres).lower()
+            genre_count: int = len(all_genres) or 1  # avoid div-by-zero
+
+            def _dim(pos_kws: List[str], neg_kws: List[str]) -> float:
+                """Score a dimension 0.1–0.9 based on genre keyword balance."""
+                pos = sum(genre_text.count(kw) for kw in pos_kws)
+                neg = sum(genre_text.count(kw) for kw in neg_kws)
+                ratio = (pos - neg) / genre_count
+                return round(max(0.1, min(0.9, 0.5 + ratio * 0.4)), 3)
+
+            energy = _dim(
+                ['rock', 'metal', 'punk', 'edm', 'dance', 'electronic', 'hip hop',
+                 'trap', 'dubstep', 'drum', 'industrial', 'hardcore'],
+                ['ambient', 'classical', 'acoustic', 'folk', 'sleep', 'calm',
+                 'meditation', 'new age', 'chamber'],
+            )
+            valence = _dim(
+                ['pop', 'happy', 'dance', 'summer', 'party', 'tropical', 'indie pop',
+                 'sunshine', 'feel good', 'bubblegum'],
+                ['sad', 'emo', 'depression', 'dark', 'doom', 'funeral', 'melanchol',
+                 'post-punk', 'gothic', 'black metal'],
+            )
+            danceability = _dim(
+                ['dance', 'disco', 'funk', 'edm', 'club', 'house', 'techno',
+                 'hip hop', 'r&b', 'reggaeton', 'trap', 'afrobeats', 'dancehall'],
+                ['classical', 'ambient', 'folk', 'acoustic', 'singer-songwriter',
+                 'bluegrass', 'chamber', 'post-rock'],
+            )
+            acousticness = _dim(
+                ['acoustic', 'folk', 'classical', 'country', 'singer-songwriter',
+                 'bluegrass', 'chamber', 'unplugged', 'neofolk', 'bossa nova'],
+                ['electronic', 'edm', 'synthpop', 'industrial', 'drum and bass',
+                 'techno', 'electro', 'dubstep'],
+            )
+            speechiness = _dim(
+                ['hip hop', 'rap', 'spoken word', 'comedy', 'trap', 'drill',
+                 'grime', 'conscious hip hop', 'east coast hip hop'],
+                ['classical', 'ambient', 'instrumental', 'post-rock', 'chamber',
+                 'new age', 'sleep'],
+            )
+
+            # Diversity: unique genre count, capped at 30 → 1.0
+            diversity = round(min(1.0, len(unique_genres) / 30.0), 3)
+
+            # Popularity signal (avg track popularity / 100)
+            avg_popularity = 0.5
+            if tracks:
+                avg_popularity = round(
+                    sum(t.get('popularity', 50) for t in tracks) / (len(tracks) * 100), 3
+                )
+
+            # Era signal: how recent is the music? (1970→0.0, 2025→1.0)
+            years: List[int] = []
+            for t in tracks:
+                rd = t.get('album', {}).get('release_date', '')
+                if rd and len(rd) >= 4:
+                    try:
+                        years.append(int(rd[:4]))
+                    except ValueError:
+                        pass
+            avg_era = round(
+                max(0.0, min(1.0, (sum(years) / len(years) - 1970) / 55.0)) if years else 0.5, 3
+            )
+
+            dna: Dict = {
+                "spotify_id": spotify_id,
+                "status": "degraded" if fallback_conditions else "ok",
+                "dimensions": {
+                    "energy": energy,
+                    "valence": valence,
+                    "danceability": danceability,
+                    "acousticness": acousticness,
+                    "speechiness": speechiness,
+                    "diversity": diversity,
+                },
+                "metadata": {
+                    "total_artists_analyzed": len(artists),
+                    "total_tracks_analyzed": len(tracks),
+                    "unique_genres": sorted(unique_genres)[:20],
+                    "avg_popularity": avg_popularity,
+                    "avg_era": avg_era,
+                    "source": "genres+popularity+era",
+                    "fallback_reasons": fallback_conditions,
+                },
+                "source": "genres+popularity+era",
+            }
+
+            logger.info(
+                "Music DNA built for %s: %d artists, %d genres, %d tracks (status=%s dimensions=%s)",
+                spotify_id, len(artists), len(unique_genres), len(tracks), dna["status"], dna["dimensions"],
+            )
+            if fallback_conditions:
+                logger.warning(
+                    "Music DNA degraded for %s due to: %s",
+                    spotify_id,
+                    fallback_conditions,
+                )
+
+            try:
+                await set_cache(cache_key, json.dumps(dna), expire=1200)  # 20 min
+                logger.info("Music DNA cache set spotify_id=%s cache_key=%s ttl_seconds=1200", spotify_id, cache_key)
+            except Exception:
+                pass
+            return dna
+
+        except Exception as exc:
+            logger.error("Error building music DNA for %s: %s", spotify_id, exc)
+            return {"error": str(exc)}
 
     # ------------------------------------------------------------------
     # Cached discovery helpers
@@ -678,6 +966,7 @@ class RecommendationEngine:
                                 ],
                                 'album': album['name'],
                                 'album_images': album.get('images', []),
+                                'album_image_url': self._select_album_image_url(album.get('images', [])),
                                 'preview_url': track.get('preview_url'),
                                 'external_urls': track.get('external_urls', {}),
                             })
@@ -858,6 +1147,9 @@ class RecommendationEngine:
                             ],
                             'album': track.get('album', {}).get('name', ''),
                             'album_images': track.get('album', {}).get('images', []),
+                            'album_image_url': self._select_album_image_url(
+                                track.get('album', {}).get('images', [])
+                            ),
                             'preview_url': track.get('preview_url'),
                             'external_urls': track.get('external_urls', {}),
                             'similarity_score': round(random.uniform(0.78, 0.93), 2),
@@ -1060,6 +1352,9 @@ class RecommendationEngine:
                                 'artists': [a['name'] for a in track.get('artists', [])],
                                 'album': track.get('album', {}).get('name', ''),
                                 'album_images': track.get('album', {}).get('images', []),
+                                'album_image_url': self._select_album_image_url(
+                                    track.get('album', {}).get('images', [])
+                                ),
                                 'preview_url': track.get('preview_url'),
                                 'external_urls': track.get('external_urls', {}),
                                 'similarity_score': round(random.uniform(0.72, 0.88), 2),

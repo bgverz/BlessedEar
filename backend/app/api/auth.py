@@ -219,6 +219,8 @@ async def callback(
         await delete_cache(f"user:{spotify_id}")
         await delete_cache(f"recommendations:{spotify_id}")
         await delete_cache(f"profile:{spotify_id}")
+        await delete_cache(f"dna:{spotify_id}")
+        await delete_cache(f"library:{spotify_id}")
         logger.debug("OAuth callback: cleared all caches for spotify_id=%s", spotify_id)
 
         user = db.query(User).filter(User.spotify_id == spotify_id).first()
@@ -305,6 +307,8 @@ async def logout(current_user: dict = Depends(get_current_user)):
     await delete_cache(f"user:{spotify_id}")
     await delete_cache(f"recommendations:{spotify_id}")
     await delete_cache(f"profile:{spotify_id}")
+    await delete_cache(f"dna:{spotify_id}")
+    await delete_cache(f"library:{spotify_id}")
     logger.info("User %s logged out: server cache cleared", spotify_id)
     return {"message": "Logged out successfully"}
 
@@ -332,6 +336,8 @@ async def switch_account(current_user: dict = Depends(get_current_user)):
     await delete_cache(f"user:{spotify_id}")
     await delete_cache(f"recommendations:{spotify_id}")
     await delete_cache(f"profile:{spotify_id}")
+    await delete_cache(f"dna:{spotify_id}")
+    await delete_cache(f"library:{spotify_id}")
     logger.info("Account switch initiated for %s: all server caches cleared", spotify_id)
 
     # Generate a fresh state token (same logic as /login) so the client can
