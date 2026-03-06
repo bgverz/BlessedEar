@@ -10,6 +10,7 @@ import re
 
 from app.api.auth import get_current_user, get_valid_access_token
 from app.core.database import get_db, get_cache, set_cache
+from app.core.perf import RoutePerf
 from app.models.playlist import Playlist
 from app.models.user import User
 from app.ml.recommender import RecommendationEngine
@@ -612,6 +613,13 @@ async def _save_generator_history(
 
 
 async def _search_prompt_tracks(sp: spotipy.Spotify, prompt: str, limit: int = 25) -> List[Dict[str, Any]]:
+    cache_key = f"playlist_search:track:{_normalize_prompt_text(prompt)}:{limit}"
+    cached = await get_cache(cache_key)
+    if cached:
+        try:
+            return json.loads(cached)
+        except Exception:
+            pass
     try:
         result = await recommendation_engine._spotify_call_with_timeout(
             sp.search,
@@ -630,13 +638,25 @@ async def _search_prompt_tracks(sp: spotipy.Spotify, prompt: str, limit: int = 2
         items = tracks.get("items")
         if not isinstance(items, list):
             return []
-        return [item for item in items if isinstance(item, dict)]
+        parsed = [item for item in items if isinstance(item, dict)]
+        try:
+            await set_cache(cache_key, json.dumps(parsed), expire=3600)
+        except Exception:
+            pass
+        return parsed
     except Exception as exc:
         logger.warning("Prompt track search failed for '%s': %s", prompt, exc)
         return []
 
 
 async def _search_prompt_artists(sp: spotipy.Spotify, prompt: str, limit: int = 20) -> List[Dict[str, Any]]:
+    cache_key = f"playlist_search:artist:{_normalize_prompt_text(prompt)}:{limit}"
+    cached = await get_cache(cache_key)
+    if cached:
+        try:
+            return json.loads(cached)
+        except Exception:
+            pass
     try:
         result = await recommendation_engine._spotify_call_with_timeout(
             sp.search,
@@ -655,13 +675,25 @@ async def _search_prompt_artists(sp: spotipy.Spotify, prompt: str, limit: int = 
         items = artists.get("items")
         if not isinstance(items, list):
             return []
-        return [item for item in items if isinstance(item, dict)]
+        parsed = [item for item in items if isinstance(item, dict)]
+        try:
+            await set_cache(cache_key, json.dumps(parsed), expire=3600)
+        except Exception:
+            pass
+        return parsed
     except Exception as exc:
         logger.warning("Prompt artist search failed for '%s': %s", prompt, exc)
         return []
 
 
 async def _search_public_playlists(sp: spotipy.Spotify, query: str, limit: int = 6) -> List[Dict[str, Any]]:
+    cache_key = f"playlist_search:playlist:{_normalize_prompt_text(query)}:{limit}"
+    cached = await get_cache(cache_key)
+    if cached:
+        try:
+            return json.loads(cached)
+        except Exception:
+            pass
     try:
         result = await recommendation_engine._spotify_call_with_timeout(
             sp.search,
@@ -680,13 +712,25 @@ async def _search_public_playlists(sp: spotipy.Spotify, query: str, limit: int =
         items = playlists.get("items")
         if not isinstance(items, list):
             return []
-        return [item for item in items if isinstance(item, dict)]
+        parsed = [item for item in items if isinstance(item, dict)]
+        try:
+            await set_cache(cache_key, json.dumps(parsed), expire=3600)
+        except Exception:
+            pass
+        return parsed
     except Exception as exc:
         logger.warning("Playlist search failed for '%s': %s", query, exc)
         return []
 
 
 async def _get_playlist_tracks(sp: spotipy.Spotify, playlist_id: str, limit: int = 30) -> List[Dict[str, Any]]:
+    cache_key = f"playlist_items:{playlist_id}:{limit}"
+    cached = await get_cache(cache_key)
+    if cached:
+        try:
+            return json.loads(cached)
+        except Exception:
+            pass
     try:
         result = await recommendation_engine._spotify_call_with_timeout(
             sp.playlist_items,
@@ -713,6 +757,10 @@ async def _get_playlist_tracks(sp: spotipy.Spotify, playlist_id: str, limit: int
                 skipped_items,
                 playlist_id,
             )
+        try:
+            await set_cache(cache_key, json.dumps(tracks), expire=21600)
+        except Exception:
+            pass
         return tracks
     except Exception as exc:
         logger.warning("Playlist tracks fetch failed for '%s': %s", playlist_id, exc)
@@ -930,26 +978,31 @@ async def generate_playlist_from_prompt(
     current_user: dict = Depends(get_current_user),
 ):
     """Generate an AI playlist from a vibe/prompt."""
+    perf = RoutePerf("playlists_generate", current_user.get("spotify_id"))
     prompt = (request.prompt or "").strip()
     if not prompt:
         raise HTTPException(status_code=400, detail="Prompt is required")
 
     limit = max(20, min(request.limit, 40))
-    access_token = await get_valid_access_token(current_user)
-    sp = await recommendation_engine.get_spotify_client(access_token)
+    with perf.step("auth"):
+        access_token = await get_valid_access_token(current_user)
+    with perf.step("spotify_client"):
+        sp = await recommendation_engine.get_spotify_client(access_token)
     prompt_profile = _parse_prompt_profile(prompt)
     spotify_id = current_user["spotify_id"]
 
-    raw_candidates, source_counts, user_genres, favorite_artist_ids = await _build_prompt_first_candidates(
-        sp=sp,
-        spotify_id=spotify_id,
-        access_token=access_token,
-        prompt=prompt,
-        profile=prompt_profile,
-        limit=limit,
-    )
+    with perf.step("build_candidates"):
+        raw_candidates, source_counts, user_genres, favorite_artist_ids = await _build_prompt_first_candidates(
+            sp=sp,
+            spotify_id=spotify_id,
+            access_token=access_token,
+            prompt=prompt,
+            profile=prompt_profile,
+            limit=limit,
+        )
 
-    excluded_ids = await _load_generator_exclusions(spotify_id, prompt, profile=prompt_profile)
+    with perf.step("load_exclusions"):
+        excluded_ids = await _load_generator_exclusions(spotify_id, prompt, profile=prompt_profile)
     scored_tracks: List[Tuple[float, float, float, Dict[str, Any]]] = []
     prompt_survivors = 0
     prompt_type = prompt_profile.get("prompt_type", "hybrid")
@@ -960,45 +1013,46 @@ async def generate_playlist_from_prompt(
     else:
         prompt_weight, taste_weight = 0.8, 0.2
 
-    for idx, candidate in enumerate(raw_candidates):
-        if not isinstance(candidate, dict):
-            logger.warning("Skipping malformed track at generated index=%d", idx)
-            continue
-        normalized = dict(candidate)
+    with perf.step("score_rerank"):
+        for idx, candidate in enumerate(raw_candidates):
+            if not isinstance(candidate, dict):
+                logger.warning("Skipping malformed track at generated index=%d", idx)
+                continue
+            normalized = dict(candidate)
+            tid = normalized.get("track_id")
+            if not isinstance(tid, str) or not tid:
+                logger.warning("Skipping candidate without track_id at generated index=%d", idx)
+                continue
+            if tid in excluded_ids:
+                continue
 
-        tid = normalized.get("track_id")
-        if not isinstance(tid, str) or not tid:
-            logger.warning("Skipping candidate without track_id at generated index=%d", idx)
-            continue
-        if tid in excluded_ids:
-            continue
+            p_score = _prompt_score_track(normalized, prompt_profile)
+            t_score = _taste_score_track(normalized, user_genres, favorite_artist_ids)
+            total = (p_score * prompt_weight) + (t_score * taste_weight)
 
-        p_score = _prompt_score_track(normalized, prompt_profile)
-        t_score = _taste_score_track(normalized, user_genres, favorite_artist_ids)
-        total = (p_score * prompt_weight) + (t_score * taste_weight)
+            source = normalized.get("source", "unknown")
+            if source == "playlist_search" and prompt_type in {"concrete", "hybrid"}:
+                total += 0.8
+            if source == "mood_fallback" and prompt_type == "abstract":
+                total += 0.45
 
-        source = normalized.get("source", "unknown")
-        if source == "playlist_search" and prompt_type in {"concrete", "hybrid"}:
-            total += 0.8
-        if source == "mood_fallback" and prompt_type == "abstract":
-            total += 0.45
+            # Strong prompt constraints for explicit language/region prompts.
+            if prompt_profile.get("language") == "spanish" and not _looks_latin_or_spanish(normalized):
+                total -= 3.0
 
-        # Strong prompt constraints for explicit language/region prompts.
-        if prompt_profile.get("language") == "spanish" and not _looks_latin_or_spanish(normalized):
-            total -= 3.0
-
-        if p_score > 0:
-            prompt_survivors += 1
-        scored_tracks.append((total, p_score, t_score, normalized))
+            if p_score > 0:
+                prompt_survivors += 1
+            scored_tracks.append((total, p_score, t_score, normalized))
 
     # If prompt profile is too restrictive, fallback to recommendation engine with prompt mood.
     if len(scored_tracks) < max(8, limit // 3):
         mood = _prompt_to_primary_mood(prompt_profile)
-        fallback = await recommendation_engine.generate_recommendations(
-            user_id=spotify_id,
-            access_token=access_token,
-            limit=limit * 2,
-        )
+        with perf.step("fallback_recommendations"):
+            fallback = await recommendation_engine.generate_recommendations(
+                user_id=spotify_id,
+                access_token=access_token,
+                limit=limit * 2,
+            )
         for raw_track in fallback:
             normalized = _normalize_candidate_track(
                 raw_track,
@@ -1047,12 +1101,13 @@ async def generate_playlist_from_prompt(
             break
 
     playlist_title = f"{prompt.title()} — curated by BlessedEar"
-    await _save_generator_history(
-        spotify_id,
-        prompt,
-        [t["track_id"] for t in normalized_tracks],
-        profile=prompt_profile,
-    )
+    with perf.step("save_history"):
+        await _save_generator_history(
+            spotify_id,
+            prompt,
+            [t["track_id"] for t in normalized_tracks],
+            profile=prompt_profile,
+        )
 
     top_genres_repr = {}
     for track in normalized_tracks:
@@ -1086,6 +1141,11 @@ async def generate_playlist_from_prompt(
         top_genres,
         language_distribution,
     )
+    perf.set_meta("raw_candidates", len(raw_candidates))
+    perf.set_meta("scored_candidates", len(scored_tracks))
+    perf.set_meta("final_tracks", len(normalized_tracks))
+    perf.set_meta("sources", source_counts)
+    logger.info("[perf] %s", perf.to_log_fields())
 
     return {
         "playlist_title": playlist_title,

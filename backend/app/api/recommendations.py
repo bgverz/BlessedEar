@@ -7,9 +7,12 @@ import time
 import spotipy
 import random
 from collections import Counter
+import json
 
 from app.api.auth import get_current_user, get_valid_access_token
 from app.core.config import get_settings
+from app.core.database import get_cache, set_cache
+from app.core.perf import RoutePerf
 from app.ml.recommender import RecommendationEngine
 
 router = APIRouter()
@@ -164,10 +167,55 @@ def _genre_overlap_score(artist_genres: List[str], user_genres: Set[str]) -> flo
     return float(len(normalized_artist & user_genres))
 
 
-async def _build_discover_context(current_user: dict, access_token: str) -> Dict[str, Any]:
+async def _build_discover_context(
+    current_user: dict,
+    access_token: str,
+    perf: Optional[RoutePerf] = None,
+) -> Dict[str, Any]:
     sp = await recommendation_engine.get_spotify_client(access_token)
-    top_artists = await recommendation_engine._get_user_top_artists(sp)
-    top_tracks = await recommendation_engine.get_user_top_tracks(sp=sp, time_range="medium_term", limit=50)
+    spotify_id = current_user.get("spotify_id", "unknown")
+
+    top_artists_cache_key = f"top_artists:{spotify_id}:all:20"
+    top_tracks_cache_key = f"top_tracks:{spotify_id}:medium_term:50"
+
+    top_artists: List[Dict[str, Any]] = []
+    top_tracks: List[Dict[str, Any]] = []
+
+    cached_artists = await get_cache(top_artists_cache_key)
+    if cached_artists:
+        try:
+            top_artists = json.loads(cached_artists)
+            if perf:
+                perf.add_count("cache_hit")
+        except Exception:
+            top_artists = []
+    if not top_artists:
+        top_artists = await recommendation_engine._get_user_top_artists(sp)
+        if perf:
+            perf.add_count("spotify_calls", 3)
+            perf.add_count("cache_miss")
+        try:
+            await set_cache(top_artists_cache_key, json.dumps(top_artists), expire=21600)
+        except Exception:
+            pass
+
+    cached_tracks = await get_cache(top_tracks_cache_key)
+    if cached_tracks:
+        try:
+            top_tracks = json.loads(cached_tracks)
+            if perf:
+                perf.add_count("cache_hit")
+        except Exception:
+            top_tracks = []
+    if not top_tracks:
+        top_tracks = await recommendation_engine.get_user_top_tracks(sp=sp, time_range="medium_term", limit=50)
+        if perf:
+            perf.add_count("spotify_calls")
+            perf.add_count("cache_miss")
+        try:
+            await set_cache(top_tracks_cache_key, json.dumps(top_tracks), expire=21600)
+        except Exception:
+            pass
 
     genre_counts: Counter = Counter()
     top_artist_ids: Set[str] = set()
@@ -236,6 +284,11 @@ def _pick_outside_genres(top_genres: List[str]) -> List[str]:
 
 def _safe_list(value: Any) -> List[Any]:
     return value if isinstance(value, list) else []
+
+
+def _normalize_cache_key_fragment(value: str) -> str:
+    cleaned = " ".join((value or "").strip().lower().split())
+    return cleaned.replace(":", "_")[:180]
 
 
 def _first_artist(track: Dict[str, Any]) -> str:
@@ -397,23 +450,54 @@ async def _safe_spotify_search(
     search_type: str,
     limit: int,
     call_name: str,
+    perf: Optional[RoutePerf] = None,
+    sem: Optional[asyncio.Semaphore] = None,
 ) -> List[Dict[str, Any]]:
+    cache_key = f"search:{search_type}:{_normalize_cache_key_fragment(query)}:{limit}"
+    cached = await get_cache(cache_key)
+    if cached:
+        try:
+            if perf:
+                perf.add_count("cache_hit")
+            return json.loads(cached)
+        except Exception:
+            pass
     try:
-        result = await recommendation_engine._spotify_call_with_timeout(
-            sp.search,
-            q=query,
-            type=search_type,
-            market="US",
-            limit=limit,
-            timeout_seconds=8.0,
-            call_name=call_name,
-        )
+        if sem:
+            async with sem:
+                result = await recommendation_engine._spotify_call_with_timeout(
+                    sp.search,
+                    q=query,
+                    type=search_type,
+                    market="US",
+                    limit=limit,
+                    timeout_seconds=8.0,
+                    call_name=call_name,
+                )
+        else:
+            result = await recommendation_engine._spotify_call_with_timeout(
+                sp.search,
+                q=query,
+                type=search_type,
+                market="US",
+                limit=limit,
+                timeout_seconds=8.0,
+                call_name=call_name,
+            )
+        if perf:
+            perf.add_count("spotify_calls")
+            perf.add_count("cache_miss")
         if not isinstance(result, dict):
             return []
         container = result.get(f"{search_type}s")
         if not isinstance(container, dict):
             return []
-        return [item for item in _safe_list(container.get("items")) if isinstance(item, dict)]
+        items = [item for item in _safe_list(container.get("items")) if isinstance(item, dict)]
+        try:
+            await set_cache(cache_key, json.dumps(items), expire=7200)
+        except Exception:
+            pass
+        return items
     except Exception as exc:
         logger.warning("Spotify search failed query='%s' type=%s: %s", query, search_type, exc)
         return []
@@ -423,19 +507,45 @@ async def _safe_playlist_tracks(
     sp: spotipy.Spotify,
     playlist_id: str,
     limit: int = 30,
+    perf: Optional[RoutePerf] = None,
+    sem: Optional[asyncio.Semaphore] = None,
 ) -> List[Dict[str, Any]]:
     if not isinstance(playlist_id, str) or not playlist_id:
         return []
+    cache_key = f"playlist_items:{playlist_id}:{limit}"
+    cached = await get_cache(cache_key)
+    if cached:
+        try:
+            if perf:
+                perf.add_count("cache_hit")
+            return json.loads(cached)
+        except Exception:
+            pass
     try:
-        result = await recommendation_engine._spotify_call_with_timeout(
-            sp.playlist_items,
-            playlist_id=playlist_id,
-            fields="items(track(id,name,artists,album,external_urls,popularity))",
-            limit=limit,
-            market="US",
-            timeout_seconds=8.0,
-            call_name=f"discover_playlist_items[{playlist_id}]",
-        )
+        if sem:
+            async with sem:
+                result = await recommendation_engine._spotify_call_with_timeout(
+                    sp.playlist_items,
+                    playlist_id=playlist_id,
+                    fields="items(track(id,name,artists,album,external_urls,popularity))",
+                    limit=limit,
+                    market="US",
+                    timeout_seconds=8.0,
+                    call_name=f"discover_playlist_items[{playlist_id}]",
+                )
+        else:
+            result = await recommendation_engine._spotify_call_with_timeout(
+                sp.playlist_items,
+                playlist_id=playlist_id,
+                fields="items(track(id,name,artists,album,external_urls,popularity))",
+                limit=limit,
+                market="US",
+                timeout_seconds=8.0,
+                call_name=f"discover_playlist_items[{playlist_id}]",
+            )
+        if perf:
+            perf.add_count("spotify_calls")
+            perf.add_count("cache_miss")
         if not isinstance(result, dict):
             return []
         tracks: List[Dict[str, Any]] = []
@@ -445,13 +555,22 @@ async def _safe_playlist_tracks(
             track = item.get("track")
             if isinstance(track, dict):
                 tracks.append(track)
+        try:
+            await set_cache(cache_key, json.dumps(tracks), expire=21600)
+        except Exception:
+            pass
         return tracks
     except Exception as exc:
         logger.warning("Playlist items fetch failed playlist_id=%s: %s", playlist_id, exc)
         return []
 
 
-async def _module_outside_bubble(context: Dict[str, Any], limit: int) -> List[Dict[str, Any]]:
+async def _module_outside_bubble(
+    context: Dict[str, Any],
+    limit: int,
+    perf: Optional[RoutePerf] = None,
+    sem: Optional[asyncio.Semaphore] = None,
+) -> List[Dict[str, Any]]:
     sp = context["sp"]
     outside_genres = _pick_outside_genres(context["top_genres"])[:limit]
     cards: List[Dict[str, Any]] = []
@@ -462,6 +581,8 @@ async def _module_outside_bubble(context: Dict[str, Any], limit: int) -> List[Di
             search_type="artist",
             limit=6,
             call_name=f"outside_bubble_artist_search[{genre}]",
+            perf=perf,
+            sem=sem,
         )
         sample_artist_names = [
             a.get("name")
@@ -481,6 +602,8 @@ async def _module_artists_you_should_know(
     context: Dict[str, Any],
     outside_genres: List[str],
     limit: int,
+    perf: Optional[RoutePerf] = None,
+    sem: Optional[asyncio.Semaphore] = None,
 ) -> List[Dict[str, Any]]:
     sp = context["sp"]
     user_genres_set: Set[str] = context["user_genres_set"]
@@ -496,6 +619,8 @@ async def _module_artists_you_should_know(
             search_type="artist",
             limit=12,
             call_name=f"artists_should_know_search[{genre}]",
+            perf=perf,
+            sem=sem,
         )
         for artist in genre_artists:
             normalized = _normalize_artist(artist, reason="Popular in your adjacent genres")
@@ -522,12 +647,14 @@ async def _module_artists_you_should_know(
             search_type="playlist",
             limit=3,
             call_name=f"artists_should_know_playlist_search[{genre}]",
+            perf=perf,
+            sem=sem,
         )
         for playlist in playlists:
             pid = playlist.get("id")
             if not isinstance(pid, str):
                 continue
-            for track in await _safe_playlist_tracks(sp, pid, limit=20):
+            for track in await _safe_playlist_tracks(sp, pid, limit=20, perf=perf, sem=sem):
                 for raw_artist in _safe_list(track.get("artists")):
                     if not isinstance(raw_artist, dict):
                         continue
@@ -559,6 +686,8 @@ async def _module_underground_radar(
     outside_genres: List[str],
     limit: int,
     max_popularity: int,
+    perf: Optional[RoutePerf] = None,
+    sem: Optional[asyncio.Semaphore] = None,
 ) -> List[Dict[str, Any]]:
     sp = context["sp"]
     user_track_ids: Set[str] = set(context["user_track_ids"])
@@ -573,6 +702,8 @@ async def _module_underground_radar(
             search_type="track",
             limit=24,
             call_name=f"underground_search[{query}]",
+            perf=perf,
+            sem=sem,
         )
         for track in tracks:
             normalized = _normalize_spotify_track(track, reason="Hidden gem in an adjacent scene")
@@ -608,6 +739,8 @@ async def _module_trending_outside(
     context: Dict[str, Any],
     outside_genres: List[str],
     limit: int,
+    perf: Optional[RoutePerf] = None,
+    sem: Optional[asyncio.Semaphore] = None,
 ) -> List[Dict[str, Any]]:
     sp = context["sp"]
     user_track_ids: Set[str] = set(context["user_track_ids"])
@@ -620,6 +753,8 @@ async def _module_trending_outside(
             search_type="track",
             limit=20,
             call_name=f"trending_outside_search[{genre}]",
+            perf=perf,
+            sem=sem,
         )
         for track in tracks:
             normalized = _normalize_spotify_track(track, reason=f"Trending now in {genre}")
@@ -684,16 +819,18 @@ async def generate_recommendations(
     current_user: dict = Depends(get_current_user)
 ):
     """Generate personalized recommendations for user"""
+    perf = RoutePerf("recommendations_generate", current_user.get("spotify_id"))
     try:
-        access_token = await _require_access_token(current_user)
-
-        recommendations = await recommendation_engine.generate_recommendations(
-            user_id=current_user["spotify_id"],
-            access_token=access_token,
-            seed_tracks=request.seed_tracks,
-            target_features=request.target_features,
-            limit=request.limit
-        )
+        with perf.step("auth"):
+            access_token = await _require_access_token(current_user)
+        with perf.step("ml_generate"):
+            recommendations = await recommendation_engine.generate_recommendations(
+                user_id=current_user["spotify_id"],
+                access_token=access_token,
+                seed_tracks=request.seed_tracks,
+                target_features=request.target_features,
+                limit=request.limit
+            )
 
         if not recommendations:
             raise HTTPException(
@@ -701,11 +838,14 @@ async def generate_recommendations(
                 detail="Could not generate recommendations. Please try again."
             )
 
+        perf.set_meta("tracks", len(recommendations))
+        logger.info("[perf] %s", perf.to_log_fields())
         return RecommendationResponse(tracks=recommendations)
 
     except HTTPException:
         raise
     except Exception as e:
+        logger.info("[perf] %s", perf.to_log_fields())
         raise HTTPException(status_code=500, detail=f"Error generating recommendations: {str(e)}")
 
 
@@ -722,15 +862,17 @@ async def generate_mood_playlist(
             detail=f"Invalid mood. Must be one of: {', '.join(valid_moods)}"
         )
 
+    perf = RoutePerf("recommendations_mood_playlist", current_user.get("spotify_id"))
     try:
-        access_token = await _require_access_token(current_user)
-
-        recommendations = await recommendation_engine.generate_mood_playlist(
-            user_id=current_user["spotify_id"],
-            access_token=access_token,
-            mood=request.mood.lower(),
-            limit=request.limit
-        )
+        with perf.step("auth"):
+            access_token = await _require_access_token(current_user)
+        with perf.step("mood_generate"):
+            recommendations = await recommendation_engine.generate_mood_playlist(
+                user_id=current_user["spotify_id"],
+                access_token=access_token,
+                mood=request.mood.lower(),
+                limit=request.limit
+            )
 
         if not recommendations:
             raise HTTPException(
@@ -738,33 +880,41 @@ async def generate_mood_playlist(
                 detail=f"Could not generate {request.mood} playlist. Please try again."
             )
 
+        perf.set_meta("tracks", len(recommendations))
+        logger.info("[perf] %s", perf.to_log_fields())
         return RecommendationResponse(tracks=recommendations)
 
     except HTTPException:
         raise
     except Exception as e:
+        logger.info("[perf] %s", perf.to_log_fields())
         raise HTTPException(status_code=500, detail=f"Error generating mood playlist: {str(e)}")
 
 
 @router.get("/profile")
 async def get_user_profile(current_user: dict = Depends(get_current_user)):
     """Get user's music profile and preferences"""
+    perf = RoutePerf("recommendations_profile", current_user.get("spotify_id"))
     try:
-        access_token = await _require_access_token(current_user)
-
-        user_profile = await recommendation_engine.build_user_profile(
-            user_id=current_user["spotify_id"],
-            access_token=access_token
-        )
+        with perf.step("auth"):
+            access_token = await _require_access_token(current_user)
+        with perf.step("build_profile"):
+            user_profile = await recommendation_engine.build_user_profile(
+                user_id=current_user["spotify_id"],
+                access_token=access_token
+            )
 
         if "error" in user_profile:
             raise HTTPException(status_code=404, detail=user_profile["error"])
 
+        perf.set_meta("tracks_analyzed", user_profile.get("total_tracks_analyzed"))
+        logger.info("[perf] %s", perf.to_log_fields())
         return user_profile
 
     except HTTPException:
         raise
     except Exception as e:
+        logger.info("[perf] %s", perf.to_log_fields())
         raise HTTPException(status_code=500, detail=f"Error getting user profile: {str(e)}")
 
 
@@ -806,21 +956,29 @@ async def get_user_top_tracks(
     current_user: dict = Depends(get_current_user)
 ):
     """Get user's top tracks from Spotify"""
+    perf = RoutePerf("recommendations_top_tracks", current_user.get("spotify_id"))
     try:
-        access_token = await _require_access_token(current_user)
-
-        top_tracks = await recommendation_engine.get_user_top_tracks(
-            sp=await recommendation_engine.get_spotify_client(access_token),
-            time_range=time_range,
-            limit=limit
-        )
-
-        normalized_tracks = [_normalize_top_track(track) for track in top_tracks]
+        with perf.step("auth"):
+            access_token = await _require_access_token(current_user)
+        with perf.step("spotify_client"):
+            sp = await recommendation_engine.get_spotify_client(access_token)
+        with perf.step("fetch_top_tracks"):
+            top_tracks = await recommendation_engine.get_user_top_tracks(
+                sp=sp,
+                time_range=time_range,
+                limit=limit
+            )
+        with perf.step("normalize"):
+            normalized_tracks = [_normalize_top_track(track) for track in top_tracks]
+        perf.add_count("spotify_calls")
+        perf.set_meta("tracks", len(normalized_tracks))
+        logger.info("[perf] %s", perf.to_log_fields())
         return {"top_tracks": normalized_tracks, "time_range": time_range}
 
     except HTTPException:
         raise
     except Exception as e:
+        logger.info("[perf] %s", perf.to_log_fields())
         raise HTTPException(status_code=500, detail=f"Error getting top tracks: {str(e)}")
 
 
@@ -829,10 +987,14 @@ async def discover_outside_bubble(
     limit: int = Query(6, ge=3, le=10),
     current_user: dict = Depends(get_current_user),
 ):
+    perf = RoutePerf("discover_outside_bubble", current_user.get("spotify_id"))
     try:
-        access_token = await _require_access_token(current_user)
-        context = await _build_discover_context(current_user, access_token)
-        cards = await _module_outside_bubble(context, limit=limit)
+        with perf.step("auth"):
+            access_token = await _require_access_token(current_user)
+        with perf.step("discover_context"):
+            context = await _build_discover_context(current_user, access_token, perf=perf)
+        with perf.step("outside_module"):
+            cards = await _module_outside_bubble(context, limit=limit, perf=perf)
 
         logger.info(
             "Discover outside-bubble spotify_id=%s top_genres=%s suggested=%d",
@@ -840,11 +1002,14 @@ async def discover_outside_bubble(
             context["top_genres"][:5],
             len(cards),
         )
+        perf.set_meta("cards", len(cards))
+        logger.info("[perf] %s", perf.to_log_fields())
         return {"outside_your_bubble": [DiscoverGenreCard.model_validate(card).model_dump() for card in cards]}
     except HTTPException:
         raise
     except Exception as exc:
         logger.exception("Outside bubble discover failed for spotify_id=%s", current_user.get("spotify_id"))
+        logger.info("[perf] %s", perf.to_log_fields())
         return {"outside_your_bubble": []}
 
 
@@ -853,22 +1018,34 @@ async def discover_artists_you_should_know(
     limit: int = Query(12, ge=6, le=20),
     current_user: dict = Depends(get_current_user),
 ):
+    perf = RoutePerf("discover_artists_you_should_know", current_user.get("spotify_id"))
     try:
-        access_token = await _require_access_token(current_user)
-        context = await _build_discover_context(current_user, access_token)
+        with perf.step("auth"):
+            access_token = await _require_access_token(current_user)
+        with perf.step("discover_context"):
+            context = await _build_discover_context(current_user, access_token, perf=perf)
         outside_genres = _pick_outside_genres(context["top_genres"])
-        artists = await _module_artists_you_should_know(context, outside_genres=outside_genres, limit=limit)
+        with perf.step("artists_module"):
+            artists = await _module_artists_you_should_know(
+                context,
+                outside_genres=outside_genres,
+                limit=limit,
+                perf=perf,
+            )
         logger.info(
             "Discover artists-you-should-know spotify_id=%s candidates=%d returned=%d",
             current_user.get("spotify_id"),
             len(artists),
             min(len(artists), limit),
         )
+        perf.set_meta("artists", len(artists))
+        logger.info("[perf] %s", perf.to_log_fields())
         return {"artists_you_should_know": [DiscoverArtistCard.model_validate(a).model_dump() for a in artists]}
     except HTTPException:
         raise
     except Exception as exc:
         logger.exception("Artists-you-should-know failed for spotify_id=%s", current_user.get("spotify_id"))
+        logger.info("[perf] %s", perf.to_log_fields())
         return {"artists_you_should_know": []}
 
 
@@ -878,27 +1055,35 @@ async def discover_underground_radar(
     max_popularity: int = Query(30, ge=5, le=40),
     current_user: dict = Depends(get_current_user),
 ):
+    perf = RoutePerf("discover_underground_radar", current_user.get("spotify_id"))
     try:
-        access_token = await _require_access_token(current_user)
-        context = await _build_discover_context(current_user, access_token)
+        with perf.step("auth"):
+            access_token = await _require_access_token(current_user)
+        with perf.step("discover_context"):
+            context = await _build_discover_context(current_user, access_token, perf=perf)
         outside_genres = _pick_outside_genres(context["top_genres"])
-        gem_candidates = await _module_underground_radar(
-            context=context,
-            outside_genres=outside_genres,
-            limit=limit,
-            max_popularity=max_popularity,
-        )
+        with perf.step("underground_module"):
+            gem_candidates = await _module_underground_radar(
+                context=context,
+                outside_genres=outside_genres,
+                limit=limit,
+                max_popularity=max_popularity,
+                perf=perf,
+            )
         logger.info(
             "Discover underground-radar spotify_id=%s gems=%d threshold=%d",
             current_user.get("spotify_id"),
             len(gem_candidates),
             max_popularity,
         )
+        perf.set_meta("tracks", len(gem_candidates))
+        logger.info("[perf] %s", perf.to_log_fields())
         return {"underground_radar": [DiscoverTrackCard.model_validate(t).model_dump() for t in gem_candidates]}
     except HTTPException:
         raise
     except Exception as exc:
         logger.exception("Underground radar failed for spotify_id=%s", current_user.get("spotify_id"))
+        logger.info("[perf] %s", perf.to_log_fields())
         return {"underground_radar": []}
 
 
@@ -907,22 +1092,29 @@ async def discover_trending_outside(
     limit: int = Query(12, ge=6, le=25),
     current_user: dict = Depends(get_current_user),
 ):
+    perf = RoutePerf("discover_trending_outside", current_user.get("spotify_id"))
     try:
-        access_token = await _require_access_token(current_user)
-        context = await _build_discover_context(current_user, access_token)
+        with perf.step("auth"):
+            access_token = await _require_access_token(current_user)
+        with perf.step("discover_context"):
+            context = await _build_discover_context(current_user, access_token, perf=perf)
         outside_genres = _pick_outside_genres(context["top_genres"])
-        picks = await _module_trending_outside(context, outside_genres=outside_genres, limit=limit)
+        with perf.step("trending_module"):
+            picks = await _module_trending_outside(context, outside_genres=outside_genres, limit=limit, perf=perf)
         logger.info(
             "Discover trending-outside spotify_id=%s genres=%s returned=%d",
             current_user.get("spotify_id"),
             outside_genres[:5],
             min(len(picks), limit),
         )
+        perf.set_meta("tracks", len(picks))
+        logger.info("[perf] %s", perf.to_log_fields())
         return {"trending_outside_your_taste": [DiscoverTrackCard.model_validate(t).model_dump() for t in picks]}
     except HTTPException:
         raise
     except Exception as exc:
         logger.exception("Trending-outside failed for spotify_id=%s", current_user.get("spotify_id"))
+        logger.info("[perf] %s", perf.to_log_fields())
         return {"trending_outside_your_taste": []}
 
 
@@ -932,9 +1124,13 @@ async def discover_by_genre(
     limit: int = Query(12, ge=6, le=30),
     current_user: dict = Depends(get_current_user),
 ):
+    perf = RoutePerf("discover_by_genre", current_user.get("spotify_id"))
     try:
-        access_token = await _require_access_token(current_user)
-        sp = await recommendation_engine.get_spotify_client(access_token)
+        with perf.step("auth"):
+            access_token = await _require_access_token(current_user)
+        with perf.step("spotify_client"):
+            sp = await recommendation_engine.get_spotify_client(access_token)
+        sem = asyncio.Semaphore(6)
         candidate_tracks: List[Dict[str, Any]] = []
         search_queries = [
             f"{genre_name} playlist",
@@ -949,6 +1145,8 @@ async def discover_by_genre(
                 search_type="track",
                 limit=20,
                 call_name=f"discover_genre_search[{query}]",
+                perf=perf,
+                sem=sem,
             )
             for track in tracks:
                 normalized = _normalize_spotify_track(track, reason=f"Exploring {genre_name}")
@@ -965,13 +1163,15 @@ async def discover_by_genre(
             search_type="playlist",
             limit=5,
             call_name=f"discover_genre_playlist_search[{genre_name}]",
+            perf=perf,
+            sem=sem,
         )
         for playlist in playlist_results:
             pid = playlist.get("id")
             pname = playlist.get("name") if isinstance(playlist.get("name"), str) else genre_name
             if not isinstance(pid, str):
                 continue
-            playlist_tracks = await _safe_playlist_tracks(sp, pid, limit=25)
+            playlist_tracks = await _safe_playlist_tracks(sp, pid, limit=25, perf=perf, sem=sem)
             for track in playlist_tracks:
                 normalized = _normalize_spotify_track(track, reason=f"Exploring {genre_name}")
                 if not normalized:
@@ -981,26 +1181,31 @@ async def discover_by_genre(
                 normalized["_score"] = float(normalized.get("popularity", 0)) / 30.0 + 0.5 + random.uniform(0, 0.3)
                 candidate_tracks.append(normalized)
 
-        normalized_tracks = _diversify_track_candidates(
+        with perf.step("rerank_diversify"):
+            normalized_tracks = _diversify_track_candidates(
             candidate_tracks,
             limit=limit,
             max_per_artist=1,
             max_per_album=1,
             max_per_source=max(2, limit // 3),
             enforce_pop_band_mix=True,
-        )
+            )
         logger.info(
             "Discover genre-feed spotify_id=%s genre=%s returned=%d",
             current_user.get("spotify_id"),
             genre_name,
             len(normalized_tracks),
         )
+        perf.set_meta("candidates_raw", len(candidate_tracks))
+        perf.set_meta("candidates_final", len(normalized_tracks))
+        logger.info("[perf] %s", perf.to_log_fields())
 
         return {"genre": genre_name, "tracks": [DiscoverTrackCard.model_validate(t).model_dump() for t in normalized_tracks]}
     except HTTPException:
         raise
     except Exception as exc:
         logger.exception("Genre discover failed for spotify_id=%s genre=%s", current_user.get("spotify_id"), genre_name)
+        logger.info("[perf] %s", perf.to_log_fields())
         return {"genre": genre_name, "tracks": []}
 
 
@@ -1009,16 +1214,21 @@ async def discover_artist_detail(
     artist_id: str,
     current_user: dict = Depends(get_current_user),
 ):
+    perf = RoutePerf("discover_artist_detail", current_user.get("spotify_id"))
     try:
-        access_token = await _require_access_token(current_user)
-        context = await _build_discover_context(current_user, access_token)
+        with perf.step("auth"):
+            access_token = await _require_access_token(current_user)
+        with perf.step("discover_context"):
+            context = await _build_discover_context(current_user, access_token, perf=perf)
         sp = context["sp"]
+        sem = asyncio.Semaphore(6)
         artist_raw = await recommendation_engine._spotify_call_with_timeout(
             sp.artist,
             artist_id,
             timeout_seconds=8.0,
             call_name=f"discover_artist[{artist_id}]",
         )
+        perf.add_count("spotify_calls")
         artist = _normalize_artist(artist_raw, reason="Artist profile")
         if not artist:
             raise HTTPException(status_code=404, detail="Artist not found")
@@ -1052,6 +1262,8 @@ async def discover_artist_detail(
                 search_type="artist",
                 limit=6,
                 call_name=f"artist_detail_adjacent_search[{genre}]",
+                perf=perf,
+                sem=sem,
             )
             for a in artists:
                 normalized = _normalize_artist(a, reason="Similar artist")
@@ -1074,6 +1286,9 @@ async def discover_artist_detail(
             len(top_tracks),
             len(related),
         )
+        perf.set_meta("tracks", len(top_tracks))
+        perf.set_meta("similar_artists", len(related))
+        logger.info("[perf] %s", perf.to_log_fields())
 
         payload = DiscoverArtistDetailResponse(
             artist=DiscoverArtistCard.model_validate(artist),
@@ -1085,6 +1300,7 @@ async def discover_artist_detail(
         raise
     except Exception as exc:
         logger.exception("Artist detail discover failed for artist_id=%s", artist_id)
+        logger.info("[perf] %s", perf.to_log_fields())
         return DiscoverArtistDetailResponse().model_dump()
 
 
@@ -1092,40 +1308,55 @@ async def discover_artist_detail(
 async def discover_explorer(
     current_user: dict = Depends(get_current_user),
 ):
+    perf = RoutePerf("discover_explorer", current_user.get("spotify_id"))
     try:
-        access_token = await _require_access_token(current_user)
-        context = await _build_discover_context(current_user, access_token)
+        with perf.step("auth"):
+            access_token = await _require_access_token(current_user)
+        with perf.step("discover_context"):
+            context = await _build_discover_context(current_user, access_token, perf=perf)
+        sem = asyncio.Semaphore(6)
         outside: List[Dict[str, Any]] = []
         artists: List[Dict[str, Any]] = []
         underground: List[Dict[str, Any]] = []
         trending: List[Dict[str, Any]] = []
 
         try:
-            outside = await _module_outside_bubble(context, limit=6)
+            with perf.step("outside_module"):
+                outside = await _module_outside_bubble(context, limit=6, perf=perf, sem=sem)
         except Exception as exc:
             logger.warning("Discover module failed: outside_your_bubble err=%s", exc)
 
         outside_genres = [card.get("genre", "") for card in outside if isinstance(card, dict)]
 
-        try:
-            artists = await _module_artists_you_should_know(context, outside_genres=outside_genres, limit=10)
-        except Exception as exc:
-            logger.warning("Discover module failed: artists_you_should_know err=%s", exc)
+        async def _safe_call(coro, module_name: str):
+            try:
+                return await coro
+            except Exception as exc:
+                logger.warning("Discover module failed: %s err=%s", module_name, exc)
+                return []
 
-        try:
-            underground = await _module_underground_radar(
-                context=context,
-                outside_genres=outside_genres,
-                limit=10,
-                max_popularity=30,
+        with perf.step("parallel_modules"):
+            artists, underground, trending = await asyncio.gather(
+                _safe_call(
+                    _module_artists_you_should_know(context, outside_genres=outside_genres, limit=10, perf=perf, sem=sem),
+                    "artists_you_should_know",
+                ),
+                _safe_call(
+                    _module_underground_radar(
+                        context=context,
+                        outside_genres=outside_genres,
+                        limit=10,
+                        max_popularity=30,
+                        perf=perf,
+                        sem=sem,
+                    ),
+                    "underground_radar",
+                ),
+                _safe_call(
+                    _module_trending_outside(context, outside_genres=outside_genres, limit=10, perf=perf, sem=sem),
+                    "trending_outside_your_taste",
+                ),
             )
-        except Exception as exc:
-            logger.warning("Discover module failed: underground_radar err=%s", exc)
-
-        try:
-            trending = await _module_trending_outside(context, outside_genres=outside_genres, limit=10)
-        except Exception as exc:
-            logger.warning("Discover module failed: trending_outside_your_taste err=%s", exc)
 
         response = DiscoverExplorerResponse(
             outside_your_bubble=[DiscoverGenreCard.model_validate(card) for card in outside],
@@ -1141,9 +1372,15 @@ async def discover_explorer(
             len(response.underground_radar),
             len(response.trending_outside_your_taste),
         )
+        perf.set_meta("outside", len(response.outside_your_bubble))
+        perf.set_meta("artists", len(response.artists_you_should_know))
+        perf.set_meta("underground", len(response.underground_radar))
+        perf.set_meta("trending", len(response.trending_outside_your_taste))
+        logger.info("[perf] %s", perf.to_log_fields())
         return response.model_dump()
     except Exception as exc:
         logger.exception("Discover explorer failed for spotify_id=%s", current_user.get("spotify_id"))
+        logger.info("[perf] %s", perf.to_log_fields())
         return DiscoverExplorerResponse().model_dump()
 
 

@@ -5,6 +5,7 @@ import json
 
 from app.api.auth import get_current_user, get_valid_access_token
 from app.core.database import get_cache, set_cache
+from app.core.perf import RoutePerf
 from app.ml.recommender import RecommendationEngine
 
 router = APIRouter()
@@ -229,12 +230,15 @@ async def _get_signals_cached(spotify_id: str, sp, time_range: str) -> Dict[str,
 
 @router.get("/taste-profile")
 async def get_taste_profile(current_user: dict = Depends(get_current_user)):
+    perf = RoutePerf("analytics_taste_profile", current_user.get("spotify_id"))
     try:
         spotify_id = current_user.get("spotify_id", "unknown")
-        access_token = await get_valid_access_token(current_user)
-        sp = await recommendation_engine.get_spotify_client(access_token)
-
-        signals = await _get_signals_cached(spotify_id, sp, time_range="medium_term")
+        with perf.step("auth"):
+            access_token = await get_valid_access_token(current_user)
+        with perf.step("spotify_client"):
+            sp = await recommendation_engine.get_spotify_client(access_token)
+        with perf.step("signals_cached"):
+            signals = await _get_signals_cached(spotify_id, sp, time_range="medium_term")
         archetype = _build_archetype(
             genre_variety=_safe_ratio(len(signals["top_genres"]), 8),
             artist_loyalty=signals["artist_loyalty"],
@@ -281,12 +285,16 @@ async def get_taste_profile(current_user: dict = Depends(get_current_user)):
             },
         }
         logger.info("Taste profile payload spotify_id=%s archetype=%s", spotify_id, archetype)
+        perf.set_meta("top_genres", len(payload["top_genres"]))
+        perf.set_meta("hidden_gems", len(signals["hidden_gems"]))
+        logger.info("[perf] %s", perf.to_log_fields())
         return payload
 
     except HTTPException:
         raise
     except Exception as exc:
         logger.exception("Taste profile failed: %s", exc)
+        logger.info("[perf] %s", perf.to_log_fields())
         raise HTTPException(status_code=500, detail="Unable to compute taste profile")
 
 
@@ -295,12 +303,15 @@ async def get_listening_insights(
     time_range: str = Query("medium_term", regex="^(short_term|medium_term|long_term)$"),
     current_user: dict = Depends(get_current_user),
 ):
+    perf = RoutePerf("analytics_listening_insights", current_user.get("spotify_id"))
     try:
         spotify_id = current_user.get("spotify_id", "unknown")
-        access_token = await get_valid_access_token(current_user)
-        sp = await recommendation_engine.get_spotify_client(access_token)
-
-        signals = await _get_signals_cached(spotify_id, sp, time_range=time_range)
+        with perf.step("auth"):
+            access_token = await get_valid_access_token(current_user)
+        with perf.step("spotify_client"):
+            sp = await recommendation_engine.get_spotify_client(access_token)
+        with perf.step("signals_cached"):
+            signals = await _get_signals_cached(spotify_id, sp, time_range=time_range)
         archetype = _build_archetype(
             genre_variety=_safe_ratio(len(signals["top_genres"]), 8),
             artist_loyalty=signals["artist_loyalty"],
@@ -333,10 +344,14 @@ async def get_listening_insights(
             signals["artist_loyalty"],
             signals["mainstream_index"],
         )
+        perf.set_meta("hidden_gems", len(payload["hidden_gems"]))
+        perf.set_meta("genre_breakdown", len(payload["sound_profile"]["genre_breakdown"]))
+        logger.info("[perf] %s", perf.to_log_fields())
         return payload
 
     except HTTPException:
         raise
     except Exception as exc:
         logger.exception("Listening insights failed: %s", exc)
+        logger.info("[perf] %s", perf.to_log_fields())
         raise HTTPException(status_code=500, detail="Unable to compute listening insights")
