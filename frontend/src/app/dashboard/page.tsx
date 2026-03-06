@@ -245,43 +245,138 @@ const AudioFeatureRadar = ({ userProfile }: { userProfile: UserProfile | null })
   );
 };
 
+/** Pick the best-fit album image URL from track.album_images. */
+const getAlbumImage = (track: RecommendationTrack, size: 'small' | 'medium' = 'small') => {
+  const imgs = track.album_images;
+  if (!imgs || imgs.length === 0) return null;
+  // Spotify returns [640, 300, 64] — index 2 = small thumbnail, index 1 = medium
+  if (size === 'small') return imgs[2]?.url ?? imgs[1]?.url ?? imgs[0]?.url;
+  return imgs[1]?.url ?? imgs[0]?.url;
+};
+
+/** List-row card used in Dashboard and playlist detail views. */
 const RecommendationCard = ({ track, showSaveButton = false, onSave }: {
   track: RecommendationTrack;
   showSaveButton?: boolean;
   onSave?: () => void;
-}) => (
-  <div className="backdrop-blur-sm bg-white/5 border border-white/10 rounded-xl p-4 hover:bg-white/10 transition-all duration-200 cursor-pointer group">
-    <div className="flex items-center gap-3">
-      <div className="w-12 h-12 bg-gradient-to-br from-green-500/20 to-green-400/20 rounded-lg flex items-center justify-center group-hover:from-green-500/30 group-hover:to-green-400/30 transition-all duration-200">
-        <Music className="w-6 h-6 text-green-500" />
-      </div>
-      <div className="flex-1 min-w-0">
-        <h4 className="font-medium text-white truncate">{track.name}</h4>
-        <p className="text-sm text-gray-400 truncate">{track.artists.join(', ')}</p>
-        <p className="text-xs text-green-400">{track.recommendation_reason}</p>
-      </div>
-      <div className="flex items-center gap-2">
-        {showSaveButton && onSave && (
-          <button
-            onClick={onSave}
-            className="w-8 h-8 rounded-full bg-blue-500/20 flex items-center justify-center hover:bg-blue-500/30 transition-colors"
-            title="Save to playlists"
-          >
-            <Save className="w-4 h-4 text-blue-400" />
-          </button>
-        )}
-        <button className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center hover:bg-green-500/20 transition-colors">
-          <Heart className="w-4 h-4 text-gray-300" />
-        </button>
-        {track.preview_url && (
-          <button className="w-8 h-8 rounded-full bg-green-500/20 flex items-center justify-center hover:bg-green-500/30 transition-colors">
-            <PlayCircle className="w-4 h-4 text-green-500" />
-          </button>
-        )}
+}) => {
+  const albumImage = getAlbumImage(track, 'small');
+  const spotifyUrl = track.external_urls?.spotify;
+
+  return (
+    <div className="group backdrop-blur-sm bg-white/5 border border-white/10 rounded-xl p-3 hover:bg-white/10 transition-all duration-200 cursor-pointer">
+      <div className="flex items-center gap-3">
+        {/* Album art with hover play overlay */}
+        <div className="relative w-12 h-12 flex-shrink-0 rounded-lg overflow-hidden shadow-md">
+          {albumImage ? (
+            <>
+              <img
+                src={albumImage}
+                alt={`${track.name} album cover`}
+                className="w-full h-full object-cover transition-all duration-200 group-hover:scale-110 group-hover:brightness-75"
+              />
+              <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                <PlayCircle className="w-5 h-5 text-white drop-shadow" />
+              </div>
+            </>
+          ) : (
+            <div className="w-full h-full bg-gradient-to-br from-green-500/20 to-green-400/20 flex items-center justify-center group-hover:from-green-500/30 group-hover:to-green-400/30 transition-all duration-200">
+              <Music className="w-6 h-6 text-green-500" />
+            </div>
+          )}
+        </div>
+
+        <div className="flex-1 min-w-0">
+          <h4 className="font-medium text-white truncate">{track.name}</h4>
+          <p className="text-sm text-gray-400 truncate">{track.artists.join(', ')}</p>
+          <p className="text-xs text-green-400 truncate">{track.recommendation_reason}</p>
+        </div>
+
+        <div className="flex items-center gap-1.5">
+          {showSaveButton && onSave && (
+            <button
+              onClick={onSave}
+              className="w-8 h-8 rounded-full bg-blue-500/20 flex items-center justify-center hover:bg-blue-500/30 transition-colors"
+              title="Save to playlists"
+            >
+              <Save className="w-4 h-4 text-blue-400" />
+            </button>
+          )}
+          {spotifyUrl && (
+            <a
+              href={spotifyUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center hover:bg-green-500/20 transition-colors"
+              title="Open in Spotify"
+            >
+              <ExternalLink className="w-4 h-4 text-gray-300 group-hover:text-green-400 transition-colors" />
+            </a>
+          )}
+        </div>
       </div>
     </div>
-  </div>
-);
+  );
+};
+
+/** Square album-art card used in the Discover grid. */
+const AlbumTrackCard = ({ track }: { track: RecommendationTrack }) => {
+  const albumImage = getAlbumImage(track, 'medium');
+  const spotifyUrl = track.external_urls?.spotify;
+
+  return (
+    <div className="group flex flex-col transition-all duration-200 hover:-translate-y-1">
+      {/* Album art container */}
+      <div className="relative aspect-square rounded-xl overflow-hidden mb-3 shadow-lg shadow-black/30">
+        {albumImage ? (
+          <>
+            {/* Blurred colour aura behind the art */}
+            <div
+              className="absolute inset-0 scale-110 blur-2xl opacity-30 z-0"
+              style={{ backgroundImage: `url(${albumImage})`, backgroundSize: 'cover', backgroundPosition: 'center' }}
+            />
+            <img
+              src={albumImage}
+              alt={`${track.name} album cover`}
+              className="relative z-10 w-full h-full object-cover transition-all duration-300 group-hover:scale-105 group-hover:brightness-75"
+            />
+          </>
+        ) : (
+          <div className="w-full h-full bg-gradient-to-br from-green-500/30 to-green-400/20 flex items-center justify-center">
+            <Music className="w-10 h-10 text-green-400" />
+          </div>
+        )}
+
+        {/* Centred play button — fades in on hover */}
+        <div className="absolute inset-0 z-20 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+          {spotifyUrl ? (
+            <a
+              href={spotifyUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="w-12 h-12 bg-green-500 rounded-full flex items-center justify-center shadow-2xl hover:scale-110 transition-transform duration-150"
+              title="Open in Spotify"
+            >
+              <PlayCircle className="w-7 h-7 text-white" />
+            </a>
+          ) : (
+            <div className="w-12 h-12 bg-green-500/80 rounded-full flex items-center justify-center shadow-2xl">
+              <PlayCircle className="w-7 h-7 text-white" />
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Track info */}
+      <div className="px-0.5">
+        <h4 className="text-sm font-semibold text-white truncate leading-snug">{track.name}</h4>
+        <p className="text-xs text-gray-400 truncate mt-0.5">{track.artists.join(', ')}</p>
+      </div>
+    </div>
+  );
+};
 
 const DashboardContent = ({
   userProfile,
@@ -548,9 +643,9 @@ const DiscoverTab = ({ token }: { token: string }) => {
             <Loader2 className="w-8 h-8 animate-spin text-green-500" />
           </div>
         ) : recommendations.length > 0 ? (
-          <div className="space-y-3">
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
             {recommendations.map((track, index) => (
-              <RecommendationCard key={track.id || index} track={track} />
+              <AlbumTrackCard key={track.id || index} track={track} />
             ))}
           </div>
         ) : (
