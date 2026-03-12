@@ -302,6 +302,87 @@ def test_discover_trending_outside_skips_malformed_search_data():
     assert isinstance(payload["trending_outside_your_taste"], list)
 
 
+def test_generate_returns_200_not_500():
+    """
+    Regression: /generate was raising AttributeError ('Request' object has no
+    attribute 'limit') because the body param was renamed from 'request' to
+    'body' when slowapi was added but one reference was missed.  Verify the
+    endpoint reaches the engine and returns 200 with valid tracks.
+    """
+    async def _fake_user():
+        return {"spotify_id": "u1", "spotify_tokens": {"access_token": "tok"}}
+
+    app.dependency_overrides[get_current_user] = _fake_user
+
+    fake_tracks = [
+        {
+            "id": f"t{i}", "name": f"Track {i}",
+            "artists": [f"Artist {i}"], "artist_ids": [f"a{i}"],
+            "album": "Album", "album_images": [], "album_image_url": None,
+            "preview_url": None, "external_urls": {},
+            "similarity_score": 0.85, "recommendation_reason": "test",
+        }
+        for i in range(5)
+    ]
+
+    with (
+        patch.object(recommendations_module, "get_valid_access_token", new=AsyncMock(return_value="tok")),
+        patch.object(
+            recommendations_module.recommendation_engine,
+            "generate_recommendations",
+            new=AsyncMock(return_value=fake_tracks),
+        ),
+    ):
+        response = client.post(
+            "/api/recommendations/generate",
+            json={"limit": 5},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.text}"
+    data = response.json()
+    assert "tracks" in data
+    assert len(data["tracks"]) == 5
+
+
+def test_generate_passes_limit_to_engine():
+    """
+    Verify the limit value from the request body is forwarded to the engine,
+    not read from the HTTP Request object (which has no .limit attribute).
+    """
+    async def _fake_user():
+        return {"spotify_id": "u1", "spotify_tokens": {"access_token": "tok"}}
+
+    app.dependency_overrides[get_current_user] = _fake_user
+
+    captured: dict = {}
+
+    async def _fake_generate(**kwargs):
+        captured.update(kwargs)
+        return [
+            {
+                "id": "t1", "name": "T", "artists": ["A"], "artist_ids": ["a1"],
+                "album": "Al", "album_images": [], "album_image_url": None,
+                "preview_url": None, "external_urls": {},
+                "similarity_score": 0.80, "recommendation_reason": "test",
+            }
+        ]
+
+    with (
+        patch.object(recommendations_module, "get_valid_access_token", new=AsyncMock(return_value="tok")),
+        patch.object(recommendations_module.recommendation_engine, "generate_recommendations", new=_fake_generate),
+    ):
+        client.post("/api/recommendations/generate", json={"limit": 12})
+
+    app.dependency_overrides.clear()
+
+    assert captured.get("limit") == 12, (
+        f"Engine received limit={captured.get('limit')!r} instead of 12 — "
+        "body.limit is probably still reading from request.limit"
+    )
+
+
 def test_diversify_track_candidates_enforces_artist_and_album_caps():
     candidates = [
         {"id": "t1", "name": "A1", "artists": ["Same Artist"], "album": "Same Album", "popularity": 70, "_source": "s1", "_score": 10},

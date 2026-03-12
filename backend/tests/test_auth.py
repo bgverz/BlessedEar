@@ -150,45 +150,25 @@ def test_callback_rejects_invalid_state():
     assert "state" in response.json()["detail"].lower()
 
 
-def test_callback_accepts_missing_state_with_warning(caplog):
-    """Callback without state should not hard-reject (backward compat), but warns."""
+def test_callback_rejects_missing_state(caplog):
+    """Callback without state must be hard-rejected with 400 (CSRF protection).
+
+    Previously the app logged a warning and continued; that was a CSRF
+    vulnerability.  The fix unconditionally rejects callbacks that arrive
+    without a state parameter.
+    """
     _clear_cache()
 
-    fake_token = {
-        "access_token": "tok",
-        "refresh_token": "ref",
-        "expires_at": 9999999999,
-        "token_type": "Bearer",
-        "scope": "",
-    }
-    fake_spotify_user = {"id": "user1", "email": "u@example.com", "display_name": "User One"}
+    import logging
+    with caplog.at_level(logging.WARNING, logger="app.api.auth"):
+        response = client.get("/api/auth/callback?code=real_code", follow_redirects=False)
 
-    mock_oauth_instance = MagicMock()
-    mock_oauth_instance.get_access_token.return_value = fake_token
-
-    mock_sp_instance = MagicMock()
-    mock_sp_instance.current_user.return_value = fake_spotify_user
-
-    with (
-        patch.object(auth_module, "get_spotify_oauth", return_value=mock_oauth_instance),
-        patch("spotipy.Spotify", return_value=mock_sp_instance),
-    ):
-        # Use dependency_overrides so FastAPI uses our mock DB, not the real
-        # SQLite file (which has no tables).  patch.object(auth_module, "get_db")
-        # only patches the module attribute; FastAPI already stored the original
-        # function object in Depends() and ignores the attribute change.
-        app.dependency_overrides[real_get_db] = _fake_db
-        try:
-            import logging
-            with caplog.at_level(logging.WARNING, logger="app.api.auth"):
-                response = client.get("/api/auth/callback?code=real_code", follow_redirects=False)
-        finally:
-            app.dependency_overrides.clear()
-
-    # Should redirect (302) to the frontend dashboard, not raise 400
-    assert response.status_code == 302, response.text
-    # A warning about the missing state must have been logged
-    assert any("state" in record.message.lower() for record in caplog.records), (
+    assert response.status_code == 400, (
+        f"Expected 400 for missing state, got {response.status_code}: {response.text}"
+    )
+    detail = response.json().get("detail", "").lower()
+    assert "state" in detail, f"Expected state in error detail, got: {detail!r}"
+    assert any("state" in r.message.lower() for r in caplog.records), (
         f"Expected a state-related warning; got: {[r.message for r in caplog.records]}"
     )
 
@@ -313,3 +293,83 @@ def test_no_cross_user_cache_leakage():
         assert alice["spotify_tokens"]["access_token"] != bob["spotify_tokens"]["access_token"]
 
     asyncio.get_event_loop().run_until_complete(_run())
+
+
+# ---------------------------------------------------------------------------
+# 7. Cache backend: Redis fallback to in-memory when Redis is unavailable
+# ---------------------------------------------------------------------------
+
+def test_cache_falls_back_to_memory_when_redis_unavailable():
+    """When Redis is unreachable the in-memory dict is used transparently."""
+    import app.core.database as db_module
+
+    # Force the probe to "not yet attempted" so we can inject a bad URL.
+    original_available = db_module._redis_available
+    original_client = db_module._redis_client
+    original_url = db_module.settings.redis_url
+
+    db_module._redis_available = None
+    db_module._redis_client = None
+    # Point at a port nothing is listening on.
+    db_module.settings.redis_url = "redis://127.0.0.1:19999"
+    db_module.memory_cache.clear()
+
+    try:
+        async def _run():
+            await db_module.set_cache("test_key", "test_value", expire=60)
+            result = await db_module.get_cache("test_key")
+            assert result == "test_value", f"Expected 'test_value', got {result!r}"
+            await db_module.delete_cache("test_key")
+            assert await db_module.get_cache("test_key") is None
+
+        asyncio.get_event_loop().run_until_complete(_run())
+        # Confirm the fallback dict was used (not Redis).
+        assert db_module._redis_available is False
+    finally:
+        db_module._redis_available = original_available
+        db_module._redis_client = original_client
+        db_module.settings.redis_url = original_url
+        db_module.memory_cache.clear()
+
+
+# ---------------------------------------------------------------------------
+# 8. /callback does not leak internal exception details to the client
+# ---------------------------------------------------------------------------
+
+def test_callback_hides_internal_exception_details():
+    """Internal errors must not be surfaced in HTTP responses.
+
+    When the Spotify token exchange raises an unexpected exception the
+    response body must contain only a safe generic message, not str(e).
+    """
+    _clear_cache()
+
+    # Seed a valid state so CSRF validation passes.
+    import asyncio
+    from app.core.database import set_cache
+    state = "err_test_state"
+    asyncio.get_event_loop().run_until_complete(
+        set_cache(f"oauth_state:{state}", "valid", expire=600)
+    )
+
+    sentinel_message = "super_secret_db_password_or_traceback_detail"
+
+    mock_oauth = MagicMock()
+    mock_oauth.get_access_token.side_effect = RuntimeError(sentinel_message)
+
+    with patch.object(auth_module, "get_spotify_oauth", return_value=mock_oauth):
+        app.dependency_overrides[real_get_db] = _fake_db
+        try:
+            response = client.get(
+                f"/api/auth/callback?code=real_code&state={state}",
+                follow_redirects=False,
+            )
+        finally:
+            app.dependency_overrides.clear()
+
+    assert response.status_code == 400
+    body = response.text
+    assert sentinel_message not in body, (
+        f"Internal error detail must not be in HTTP response, but found it in: {body!r}"
+    )
+    assert "Authentication failed" in body

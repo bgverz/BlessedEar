@@ -1,11 +1,13 @@
 from sqlalchemy import create_engine, MetaData
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.pool import StaticPool
 from app.core.config import get_settings
+import logging
 import time
+from typing import Optional
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 if settings.database_url.startswith("sqlite"):
     engine = create_engine(
@@ -19,7 +21,6 @@ else:
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-memory_cache: dict = {}
 
 def get_db():
     db = SessionLocal()
@@ -28,16 +29,64 @@ def get_db():
     finally:
         db.close()
 
+
 async def init_db():
-    """Create database tables"""
+    """Create database tables (dev/test only — production uses Alembic)."""
     Base.metadata.create_all(bind=engine)
-    print("Database initialized!")
+    logger.info("Database tables ensured.")
+
+
+memory_cache: dict = {}
+
+_redis_client = None
+_redis_available: Optional[bool] = None
+
+
+async def _get_redis():
+    """Return an async Redis client if Redis is reachable, else None."""
+    global _redis_client, _redis_available
+
+    if _redis_available is True:
+        return _redis_client
+    if _redis_available is False:
+        return None
+
+    try:
+        import redis.asyncio as aioredis
+        client = aioredis.from_url(
+            settings.redis_url,
+            decode_responses=True,
+            socket_connect_timeout=2,
+            socket_timeout=2,
+        )
+        await client.ping()
+        _redis_client = client
+        _redis_available = True
+        logger.info("Cache backend: Redis at %s", settings.redis_url)
+        return _redis_client
+    except Exception as exc:
+        _redis_available = False
+        logger.warning(
+            "Redis not reachable (%s) — falling back to in-memory cache. "
+            "This is NOT suitable for multi-worker production deployments.",
+            exc,
+        )
+        return None
+
 
 async def set_cache(key: str, value: str, expire: int = 3600):
+    r = await _get_redis()
+    if r is not None:
+        await r.setex(key, expire, value)
+        return
     expires_at = time.time() + expire if expire > 0 else None
     memory_cache[key] = (value, expires_at)
 
-async def get_cache(key: str):
+
+async def get_cache(key: str) -> Optional[str]:
+    r = await _get_redis()
+    if r is not None:
+        return await r.get(key)
     entry = memory_cache.get(key)
     if entry is None:
         return None
@@ -47,5 +96,10 @@ async def get_cache(key: str):
         return None
     return value
 
+
 async def delete_cache(key: str):
+    r = await _get_redis()
+    if r is not None:
+        await r.delete(key)
+        return
     memory_cache.pop(key, None)

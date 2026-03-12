@@ -1,6 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, Request, status, Query
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 from fastapi.responses import RedirectResponse
 from fastapi.security import HTTPBearer
+from pydantic import BaseModel
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 from spotipy.cache_handler import MemoryCacheHandler
@@ -22,6 +25,7 @@ router = APIRouter()
 settings = get_settings()
 oauth2_scheme = HTTPBearer()
 logger = logging.getLogger(__name__)
+limiter = Limiter(key_func=get_remote_address)
 
 
 def get_spotify_oauth():
@@ -47,8 +51,6 @@ def get_spotify_oauth():
             "playlist-read-private playlist-read-collaborative"
         ),
         show_dialog=True,
-        # Per-instance in-memory cache: no shared .cache file, no cross-request
-        # token pollution, no stale identity reuse across account switches.
         cache_handler=MemoryCacheHandler(),
     )
 
@@ -145,7 +147,8 @@ async def get_valid_access_token(user_data: dict) -> str:
 
 
 @router.get("/login")
-async def login(force: bool = Query(True, description="Force fresh authentication (always show Spotify dialog)")):
+@limiter.limit("20/minute")
+async def login(request: Request, force: bool = Query(True, description="Force fresh authentication (always show Spotify dialog)")):
     """Initiate Spotify OAuth flow.
 
     show_dialog=True is always sent so Spotify shows the account-chooser/consent
@@ -156,15 +159,14 @@ async def login(force: bool = Query(True, description="Force fresh authenticatio
     state = secrets.token_urlsafe(16)
     await set_cache(f"oauth_state:{state}", "valid", expire=600)
     sp_oauth = get_spotify_oauth()
-    # show_dialog=True is set in get_spotify_oauth() constructor so it is
-    # included in the URL regardless of the installed spotipy version.
     auth_url = sp_oauth.get_authorize_url(state=state)
     logger.debug("OAuth login initiated: state=%s", state)
     return {"auth_url": auth_url}
 
 
 @router.get("/callback")
-async def callback(
+@limiter.limit("20/minute")
+async def callback(request: Request,
     code: str,
     state: Optional[str] = None,
     db: Session = Depends(get_db),
@@ -175,33 +177,26 @@ async def callback(
     Spotify code for tokens.  The resulting JWT is stored under a one-time
     code so it is never exposed in the redirect URL.
     """
-    # --- CSRF state validation ---
-    if state:
-        cached = await get_cache(f"oauth_state:{state}")
-        if not cached:
-            logger.warning("OAuth callback: invalid or expired state=%s — rejecting", state)
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid or expired OAuth state. Please start the login flow again.",
-            )
-        await delete_cache(f"oauth_state:{state}")
-        logger.debug("OAuth callback: state=%s validated and consumed", state)
-    else:
-        # Older clients may not send state; warn but continue for compatibility.
-        logger.warning("OAuth callback received without a state parameter")
+    if not state:
+        logger.warning("OAuth callback rejected: missing state parameter")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing OAuth state parameter. Please start the login flow again.",
+        )
+    cached = await get_cache(f"oauth_state:{state}")
+    if not cached:
+        logger.warning("OAuth callback: invalid or expired state=%s — rejecting", state)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired OAuth state. Please start the login flow again.",
+        )
+    await delete_cache(f"oauth_state:{state}")
+    logger.debug("OAuth callback: state=%s validated and consumed", state)
 
     try:
         sp_oauth = get_spotify_oauth()
-        # check_cache=False forces spotipy to ALWAYS exchange the authorization
-        # code with Spotify rather than returning a previously cached token.
-        # Without this, a valid cached token for User A (e.g. Braden Garcia) would
-        # be returned even after User B (e.g. _maddiepalm) just approved the OAuth
-        # flow — making account switching silently fail.
         token_info = sp_oauth.get_access_token(code, check_cache=False)
 
-        # Build a fresh Spotify client from the *new* access token so that
-        # current_user() reflects the account that just approved OAuth — not any
-        # previously cached identity.
         sp = spotipy.Spotify(auth=token_info['access_token'])
         spotify_user = sp.current_user()
         spotify_id = spotify_user['id']
@@ -212,10 +207,6 @@ async def callback(
             spotify_id, display_name,
         )
 
-        # Evict ALL cached data for this user so that account-switching and
-        # re-authentication always start with a clean slate.  This prevents a
-        # previous session's recommendations / profile from being silently
-        # served to a user who has just logged in (possibly as a different account).
         await delete_cache(f"user:{spotify_id}")
         await delete_cache(f"recommendations:{spotify_id}")
         await delete_cache(f"profile:{spotify_id}")
@@ -257,8 +248,6 @@ async def callback(
         }
         await set_cache(f"user:{user.spotify_id}", json.dumps(user_cache_data))
 
-        # Store the JWT under a short-lived one-time code (60 s) so it is never
-        # exposed in the redirect URL directly.
         auth_code = str(uuid.uuid4())
         await set_cache(f"auth_code:{auth_code}", access_token, expire=60)
 
@@ -270,23 +259,32 @@ async def callback(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("OAuth callback error: %s", e)
+        logger.error("OAuth callback error: %s", e, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Authentication failed: {str(e)}",
+            detail="Authentication failed. Please try again.",
         )
 
 
+class ExchangeRequest(BaseModel):
+    code: str
+
+
 @router.post("/exchange")
-async def exchange_code(code: str):
-    """Exchange a one-time auth code for a JWT access token"""
-    access_token = await get_cache(f"auth_code:{code}")
+@limiter.limit("20/minute")
+async def exchange_code(request: Request, body: ExchangeRequest):
+    """Exchange a one-time auth code for a JWT access token.
+
+    The code is sent in the JSON request body (not a query parameter) so it
+    never appears in server access logs, browser history, or Referer headers.
+    """
+    access_token = await get_cache(f"auth_code:{body.code}")
     if not access_token:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid or expired auth code"
         )
-    await delete_cache(f"auth_code:{code}")
+    await delete_cache(f"auth_code:{body.code}")
     return {"access_token": access_token}
 
 
@@ -340,8 +338,6 @@ async def switch_account(current_user: dict = Depends(get_current_user)):
     await delete_cache(f"library:{spotify_id}")
     logger.info("Account switch initiated for %s: all server caches cleared", spotify_id)
 
-    # Generate a fresh state token (same logic as /login) so the client can
-    # redirect immediately without a second round-trip.
     state = secrets.token_urlsafe(16)
     await set_cache(f"oauth_state:{state}", "valid", expire=600)
     sp_oauth = get_spotify_oauth()

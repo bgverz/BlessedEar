@@ -1,13 +1,21 @@
+# docker-compose.yml — LOCAL DEVELOPMENT ONLY
+#
+# Do NOT use this file in production.  For production, copy .env.example to
+# .env, fill in real secrets, and run:
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# All services here use hot-reload and default credentials suitable for local
+# dev only.  No volumes are persisted across `docker compose down -v`.
+
 version: '3.8'
 
 services:
-  # PostgreSQL Database
   postgres:
     image: postgres:15
     environment:
       POSTGRES_DB: blessedear
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: postgres   # dev only — change in production
     ports:
       - "5432:5432"
     volumes:
@@ -18,7 +26,6 @@ services:
       timeout: 5s
       retries: 5
 
-  # Redis Cache
   redis:
     image: redis:7-alpine
     ports:
@@ -29,7 +36,6 @@ services:
       timeout: 3s
       retries: 5
 
-  # Backend API
   backend:
     build:
       context: ./backend
@@ -41,17 +47,22 @@ services:
       - REDIS_URL=redis://redis:6379
       - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}
       - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET}
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-your-secret-key-here}
+      - SPOTIFY_REDIRECT_URI=${SPOTIFY_REDIRECT_URI:-http://127.0.0.1:8000/api/auth/callback}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3000}
+      - DEBUG=true         # dev only — NEVER set true in production
+      - LOG_LEVEL=DEBUG
     volumes:
-      - ./backend:/app
+      - ./backend:/app    # hot-reload — remove in production
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    # Run Alembic migrations before starting the server
+    command: >
+      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
 
-  # Frontend
   frontend:
     build:
       context: ./frontend
@@ -59,10 +70,10 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     volumes:
       - ./frontend:/app
-      - /app/node_modules
+      - /app/node_modules  # preserve container node_modules
     depends_on:
       - backend
 

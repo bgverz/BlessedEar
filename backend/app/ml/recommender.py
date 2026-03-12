@@ -12,11 +12,6 @@ from app.core.database import get_cache, set_cache
 
 logger = logging.getLogger(__name__)
 
-# Spotify audio feature targets per mood.
-# Keys use Spotify's recommendation API naming:
-#   target_*  → preferred value (soft)
-#   min_*     → hard lower bound
-#   max_*     → hard upper bound
 MOOD_TARGETS: Dict[str, Dict[str, float]] = {
     'happy':     {'target_valence': 0.80, 'target_energy': 0.70, 'min_valence': 0.55},
     'sad':       {'target_valence': 0.20, 'target_energy': 0.30, 'max_valence': 0.45},
@@ -31,10 +26,9 @@ _AUDIO_FEATURE_COLS = [
     'acousticness', 'instrumentalness', 'liveness', 'tempo',
 ]
 
-# Recommendation history settings
-_REC_HISTORY_MAX = 500   # track IDs to keep per user
-_REC_HISTORY_TTL = 604800  # 7 days in seconds
-_LIBRARY_CACHE_TTL = 1800  # 30 min — cache user library between generations
+_REC_HISTORY_MAX = 500
+_REC_HISTORY_TTL = 604800
+_LIBRARY_CACHE_TTL = 1800
 
 
 class RecommendationEngine:
@@ -92,9 +86,6 @@ class RecommendationEngine:
 
         return valid_images[0].get("url")
 
-    # ------------------------------------------------------------------
-    # Audio features
-    # ------------------------------------------------------------------
 
     async def extract_audio_features(self, sp: spotipy.Spotify, track_ids: List[str]) -> pd.DataFrame:
         """
@@ -111,7 +102,6 @@ class RecommendationEngine:
         if not track_ids:
             return pd.DataFrame()
 
-        # Filter out None/empty IDs before batching
         valid_ids = [tid for tid in track_ids if tid]
         total = len(valid_ids)
         batch_count = (total + 99) // 100
@@ -140,7 +130,7 @@ class RecommendationEngine:
                         "Audio features batch %d: 401 Unauthorized — raising for token refresh",
                         batch_num,
                     )
-                    raise  # caller handles refresh
+                    raise
 
                 elif exc.http_status == 403:
                     logger.warning(
@@ -151,7 +141,7 @@ class RecommendationEngine:
                         batch_num, batch[:3],
                     )
                     fail_batches += 1
-                    break  # No point trying further batches
+                    break
 
                 elif exc.http_status == 429:
                     retry_after = 2
@@ -199,10 +189,6 @@ class RecommendationEngine:
             return pd.DataFrame()
 
         return pd.DataFrame(all_features)
-
-    # ------------------------------------------------------------------
-    # Library fetching helpers
-    # ------------------------------------------------------------------
 
     async def get_user_top_tracks(self, sp: spotipy.Spotify, time_range: str = "medium_term", limit: int = 50):
         """Get user's top tracks for a given time range."""
@@ -260,7 +246,6 @@ class RecommendationEngine:
         """Paginate through user-owned playlists and collect all their tracks."""
         user_id = sp.me()['id']
 
-        # Collect all playlists first
         all_playlists: List[Dict] = []
         offset = 0
         while True:
@@ -279,7 +264,6 @@ class RecommendationEngine:
 
         logger.info(f"Found {len(all_playlists)} playlists")
 
-        # Collect tracks from user-owned playlists
         tracks: List[Dict] = []
         for playlist in all_playlists:
             if len(tracks) >= max_tracks:
@@ -352,10 +336,6 @@ class RecommendationEngine:
         )
         random.shuffle(unique)
         return unique[:limit]
-
-    # ------------------------------------------------------------------
-    # Candidate generation helpers
-    # ------------------------------------------------------------------
 
     async def get_artist_similar_tracks(self, sp: spotipy.Spotify, artist_id: str, limit: int = 10) -> List[Dict]:
         """Sample tracks from the artist's recent albums and singles."""
@@ -589,10 +569,6 @@ class RecommendationEngine:
             logger.warning("Spotify recommendations API unexpected error: %s", exc)
             return []
 
-    # ------------------------------------------------------------------
-    # User profile
-    # ------------------------------------------------------------------
-
     async def build_user_profile(self, user_id: str, access_token: str):
         """Build a user profile using real Spotify audio features (not random)."""
         try:
@@ -607,7 +583,6 @@ class RecommendationEngine:
             features_df = await self.extract_audio_features(sp, track_ids)
 
             if features_df.empty or not any(c in features_df.columns for c in _AUDIO_FEATURE_COLS):
-                # Graceful fallback: neutral values
                 avg_features = {col: 0.5 for col in _AUDIO_FEATURE_COLS}
                 avg_features['tempo'] = 120.0
             else:
@@ -670,7 +645,6 @@ class RecommendationEngine:
             sp = await self.get_spotify_client(access_token)
             fallback_conditions: List[str] = []
 
-            # --- Collect top artists across all time ranges ---
             artists: List[Dict] = []
             seen_artist_ids: Set[str] = set()
             for time_range in ('short_term', 'medium_term', 'long_term'):
@@ -694,7 +668,6 @@ class RecommendationEngine:
                     fallback_conditions.append(f"top_artists_error:{time_range}")
                     logger.debug("Top artists (%s) skipped: %s", time_range, exc)
 
-            # --- Collect top tracks across all time ranges ---
             tracks: List[Dict] = []
             seen_track_ids: Set[str] = set()
             for time_range in ('short_term', 'medium_term', 'long_term'):
@@ -748,14 +721,13 @@ class RecommendationEngine:
                     "error": "No Spotify data available — connect Spotify and try again",
                 }
 
-            # --- Build genre corpus ---
             all_genres: List[str] = []
             for artist in artists:
                 all_genres.extend(artist.get('genres', []))
 
             unique_genres: Set[str] = set(all_genres)
             genre_text: str = ' '.join(all_genres).lower()
-            genre_count: int = len(all_genres) or 1  # avoid div-by-zero
+            genre_count: int = len(all_genres) or 1
 
             def _dim(pos_kws: List[str], neg_kws: List[str]) -> float:
                 """Score a dimension 0.1–0.9 based on genre keyword balance."""
@@ -795,17 +767,14 @@ class RecommendationEngine:
                  'new age', 'sleep'],
             )
 
-            # Diversity: unique genre count, capped at 30 → 1.0
             diversity = round(min(1.0, len(unique_genres) / 30.0), 3)
 
-            # Popularity signal (avg track popularity / 100)
             avg_popularity = 0.5
             if tracks:
                 avg_popularity = round(
                     sum(t.get('popularity', 50) for t in tracks) / (len(tracks) * 100), 3
                 )
 
-            # Era signal: how recent is the music? (1970→0.0, 2025→1.0)
             years: List[int] = []
             for t in tracks:
                 rd = t.get('album', {}).get('release_date', '')
@@ -853,7 +822,7 @@ class RecommendationEngine:
                 )
 
             try:
-                await set_cache(cache_key, json.dumps(dna), expire=1200)  # 20 min
+                await set_cache(cache_key, json.dumps(dna), expire=1200)
                 logger.info("Music DNA cache set spotify_id=%s cache_key=%s ttl_seconds=1200", spotify_id, cache_key)
             except Exception:
                 pass
@@ -863,9 +832,6 @@ class RecommendationEngine:
             logger.error("Error building music DNA for %s: %s", spotify_id, exc)
             return {"error": str(exc)}
 
-    # ------------------------------------------------------------------
-    # Cached discovery helpers
-    # ------------------------------------------------------------------
 
     async def _get_related_artists_cached(self, sp: spotipy.Spotify, artist_id: str) -> List[Dict]:
         """Fetch related artists, caching results for 24 h."""
@@ -941,7 +907,7 @@ class RecommendationEngine:
         if cached:
             try:
                 all_tracks = json.loads(cached)
-                random.shuffle(all_tracks)  # vary which tracks are returned each call
+                random.shuffle(all_tracks)
                 return [t for t in all_tracks if t['id'] not in exclude_ids][:limit]
             except Exception:
                 pass
@@ -950,7 +916,7 @@ class RecommendationEngine:
             albums_result = sp.artist_albums(artist_id, album_type='album,single', limit=10)
             all_tracks: List[Dict] = []
             album_items = list(albums_result.get('items', []))
-            random.shuffle(album_items)  # vary which albums we sample from
+            random.shuffle(album_items)
             for album in album_items[:5]:
                 try:
                     tracks_result = sp.album_tracks(album['id'], limit=10)
@@ -1020,7 +986,6 @@ class RecommendationEngine:
                 history = json.loads(existing)
             except Exception:
                 pass
-        # Prepend newest IDs; drop duplicates; trim to max
         new_set = set(new_track_ids)
         combined = list(new_track_ids) + [tid for tid in history if tid not in new_set]
         trimmed = combined[:_REC_HISTORY_MAX]
@@ -1029,9 +994,6 @@ class RecommendationEngine:
         except Exception:
             pass
 
-    # ------------------------------------------------------------------
-    # Recommendation generation
-    # ------------------------------------------------------------------
 
     async def generate_recommendations(
         self,
@@ -1066,7 +1028,6 @@ class RecommendationEngine:
             sp = await self.get_spotify_client(access_token)
             logger.info("Generating recommendations for user %s", user_id)
 
-            # 1. Fetch user's full library (cached 30 min)
             all_user_tracks = await self._get_user_library_cached(user_id, sp)
             if not all_user_tracks:
                 logger.warning("No user tracks found — aborting")
@@ -1075,7 +1036,6 @@ class RecommendationEngine:
             user_track_ids: Set[str] = {t['id'] for t in all_user_tracks}
             logger.info("Library: %d unique tracks", len(user_track_ids))
 
-            # 2. Load recommendation history; build exclusion set
             rec_history = await self._load_rec_history(user_id)
             exclusion_set: Set[str] = user_track_ids | rec_history
             logger.info(
@@ -1083,7 +1043,6 @@ class RecommendationEngine:
                 len(user_track_ids), len(rec_history), len(exclusion_set),
             )
 
-            # 3. Extract artists and rank by library frequency
             artist_frequency: Dict[str, int] = defaultdict(int)
             for track in all_user_tracks:
                 for artist in track.get('artists', []):
@@ -1096,12 +1055,10 @@ class RecommendationEngine:
             )
             logger.info("Artists in library: %d unique", len(top_artists_by_freq))
 
-            # 4. Augment with Spotify's own top-artist ranking
             logger.info("Fetching Spotify top artists to augment seeds…")
             spotify_top = await self._get_user_top_artists(sp)
             spotify_top_ids = [a['id'] for a in spotify_top if a.get('id')]
 
-            # Build full artist pool (Spotify top + library freq, deduplicated)
             full_artist_pool: List[str] = []
             seen_in_pool: Set[str] = set()
             for aid in spotify_top_ids:
@@ -1113,7 +1070,6 @@ class RecommendationEngine:
                     full_artist_pool.append(aid)
                     seen_in_pool.add(aid)
 
-            # Anchor on top 5 favourites; randomly sample 15 more from the rest
             anchors = full_artist_pool[:5]
             rest = full_artist_pool[5:]
             random.shuffle(rest)
@@ -1123,7 +1079,6 @@ class RecommendationEngine:
                 len(anchors), min(len(rest), 15), len(seed_artist_ids), len(full_artist_pool),
             )
 
-            # 5 & 6. Build candidate pool using only working endpoints
             candidate_pool: List[Dict] = []
             seen_candidate_ids: Set[str] = set(exclusion_set)
 
@@ -1131,7 +1086,6 @@ class RecommendationEngine:
                 if len(candidate_pool) >= 300:
                     break
 
-                # Strategy A: artist top tracks (shuffled for per-call variety)
                 top_tracks = await self._get_artist_top_tracks_cached(sp, artist_id)
                 shuffled_top = list(top_tracks)
                 random.shuffle(shuffled_top)
@@ -1157,7 +1111,6 @@ class RecommendationEngine:
                         })
                         seen_candidate_ids.add(tid)
 
-                # Strategy B: catalog deep cuts (album-shuffled via _get_artist_catalog_tracks)
                 catalog = await self._get_artist_catalog_tracks(
                     sp, artist_id, seen_candidate_ids, limit=15
                 )
@@ -1189,7 +1142,6 @@ class RecommendationEngine:
                 )
                 return []
 
-            # 7. Tiered random sampling with artist diversity
             random.shuffle(candidate_pool)
             final_recs: List[Dict] = []
             artist_counts: Dict[str, int] = defaultdict(int)
@@ -1198,7 +1150,6 @@ class RecommendationEngine:
                 ids = t.get('artist_ids', [])
                 return ids[0] if ids else (t['artists'][0] if t['artists'] else 'unknown')
 
-            # Pass 1: max 1 track per artist (strict diversity)
             for track in candidate_pool:
                 if artist_counts[_primary(track)] < 1:
                     final_recs.append(track)
@@ -1206,7 +1157,6 @@ class RecommendationEngine:
                 if len(final_recs) >= limit:
                     break
 
-            # Pass 2: relax to max 2 per artist if still under limit
             if len(final_recs) < limit:
                 used_ids = {t['id'] for t in final_recs}
                 for track in candidate_pool:
@@ -1217,7 +1167,6 @@ class RecommendationEngine:
                     if len(final_recs) >= limit:
                         break
 
-            # Pass 3: uncapped fill for any remaining slots
             if len(final_recs) < limit:
                 used_ids = {t['id'] for t in final_recs}
                 for track in candidate_pool:
@@ -1232,7 +1181,6 @@ class RecommendationEngine:
                 len(final_recs), len({_primary(t) for t in final_recs}),
             )
 
-            # 8. Save returned IDs to recommendation history
             await self._save_rec_history(user_id, [t['id'] for t in final_recs])
 
             return final_recs[:limit]
@@ -1265,7 +1213,6 @@ class RecommendationEngine:
 
             user_track_ids: Set[str] = {t['id'] for t in all_user_tracks}
 
-            # Load recommendation history to avoid repeating recently shown tracks
             rec_history = await self._load_rec_history(user_id)
             logger.info(
                 "Mood playlist '%s': %d library tracks, %d history exclusions "
@@ -1275,7 +1222,6 @@ class RecommendationEngine:
 
             mood_recs: List[Dict] = []
 
-            # --- Step 1: keyword matching from user's own library ---
             mood_keywords: Dict[str, List[str]] = {
                 'happy':     ['love', 'happy', 'good', 'feel', 'dance', 'party', 'sun', 'bright', 'joy'],
                 'sad':       ['sad', 'cry', 'alone', 'broken', 'hurt', 'miss', 'lost', 'tear', 'rain'],
@@ -1289,7 +1235,7 @@ class RecommendationEngine:
             kw_scored: List[tuple] = []
             for track in all_user_tracks:
                 if track['id'] in rec_history:
-                    continue  # skip recently recommended tracks
+                    continue
                 text = ' '.join([
                     track.get('name', ''),
                     ' '.join(a.get('name', '') for a in track.get('artists', [])),
@@ -1299,9 +1245,7 @@ class RecommendationEngine:
                 if score > 0:
                     kw_scored.append((track, score))
 
-            # Sort by score descending, then shuffle within equal-score groups for variety
             kw_scored.sort(key=lambda x: x[1], reverse=True)
-            # Shuffle tracks that share the top score so we don't always pick the same ones
             if kw_scored:
                 top_score = kw_scored[0][1]
                 top_group = [x for x in kw_scored if x[1] == top_score]
@@ -1322,8 +1266,6 @@ class RecommendationEngine:
                 })
             logger.info("Mood '%s': %d tracks from keyword matching", mood, len(mood_recs))
 
-            # --- Step 2: catalog filler from favourite artists ---
-            # Uses artist_top_tracks + artist_albums + album_tracks (all working)
             if len(mood_recs) < limit:
                 artist_frequency: Dict[str, int] = defaultdict(int)
                 for track in all_user_tracks:
@@ -1341,7 +1283,6 @@ class RecommendationEngine:
                     if needed <= 0:
                         break
 
-                    # top tracks first (artist_top_tracks)
                     top_tracks = await self._get_artist_top_tracks_cached(sp, artist_id)
                     for track in top_tracks[:3]:
                         tid = track.get('id')
@@ -1365,7 +1306,6 @@ class RecommendationEngine:
                         if needed <= 0:
                             break
 
-                    # catalog deep cuts (artist_albums + album_tracks)
                     if needed > 0:
                         catalog = await self._get_artist_catalog_tracks(
                             sp, artist_id, existing_ids, limit=5

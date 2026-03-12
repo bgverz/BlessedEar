@@ -4,20 +4,26 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { Music, Sparkles, ArrowRight, Loader2 } from 'lucide-react';
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
 export default function LoginPage() {
   const [isLoading, setIsLoading] = useState(false);
+  const [loginError, setLoginError] = useState('');
 
   const handleSpotifyLogin = async () => {
     setIsLoading(true);
+    setLoginError('');
     try {
-      const response = await fetch('http://localhost:8000/api/auth/login');
+      const response = await fetch(`${API_BASE}/api/auth/login`);
       const data = await response.json();
-      
       if (data.auth_url) {
         window.location.href = data.auth_url;
+      } else {
+        setLoginError('Could not start login. Please try again.');
+        setIsLoading(false);
       }
-    } catch (error) {
-      console.error('Login error:', error);
+    } catch {
+      setLoginError('Could not connect to the server. Please try again.');
       setIsLoading(false);
     }
   };
@@ -65,6 +71,11 @@ export default function LoginPage() {
               </div>
             </div>
           </div>
+
+          {/* Error message */}
+          {loginError && (
+            <p className="text-sm text-rose-300 text-center mb-4">{loginError}</p>
+          )}
 
           {/* Login Button */}
           <button

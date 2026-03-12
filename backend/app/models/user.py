@@ -1,4 +1,3 @@
-# app/models/user.py
 from sqlalchemy import Column, Integer, String, DateTime, JSON, Text
 from sqlalchemy.orm import relationship
 from datetime import datetime

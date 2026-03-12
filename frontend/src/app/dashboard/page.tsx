@@ -3,7 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import { Music, BarChart3, Sparkles, PlayCircle, Heart, TrendingUp, Loader2, Clock, Star, ExternalLink, Trash2, Plus, Download, Calendar, Hash, Save } from 'lucide-react';
 
-const API_BASE = 'http://localhost:8000';
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 interface UserProfile {
   user_id: string;
@@ -251,28 +251,22 @@ const Sidebar = ({ activeTab, setActiveTab, userDisplayName }) => {
             onClick={async () => {
               const t = sessionStorage.getItem('access_token');
 
-              // 1. Wipe ALL client-side auth state immediately so no stale
-              //    JWT can be reused after this point.
               sessionStorage.removeItem('access_token');
 
               if (t) {
                 try {
-                  // 2. Call /switch: clears server-side caches AND returns a
-                  //    fresh Spotify auth URL with show_dialog=true + new state.
                   const res = await fetch(`${API_BASE}/api/auth/switch`, {
                     method: 'POST',
                     headers: { 'Authorization': `Bearer ${t}` },
                   });
                   const data = await res.json();
                   if (data.auth_url) {
-                    // 3. Hard-redirect straight to Spotify — no stale SPA state.
                     window.location.href = data.auth_url;
                     return;
                   }
                 } catch (_) { /* fall through to login page */ }
               }
 
-              // Fallback: go to login page if /switch fails or no token existed.
               window.location.href = '/login';
             }}
             className="mt-2 w-full text-xs text-gray-400 hover:text-white py-1 px-2 rounded border border-gray-600 hover:border-gray-400 transition-colors"
@@ -318,9 +312,9 @@ const TasteProfileCard = ({
 }) => {
   if (isLoading) {
     return (
-      <GlassCard className="h-80">
+      <GlassCard>
         <h3 className="text-lg font-semibold text-white mb-4">Your Taste Profile</h3>
-        <div className="flex items-center justify-center h-48">
+        <div className="flex items-center justify-center py-12">
           <Loader2 className="w-8 h-8 animate-spin text-green-500" />
         </div>
       </GlassCard>
@@ -329,9 +323,9 @@ const TasteProfileCard = ({
 
   if (hasError || !profile) {
     return (
-      <GlassCard className="h-80">
+      <GlassCard>
         <h3 className="text-lg font-semibold text-white mb-4">Your Taste Profile</h3>
-        <div className="flex flex-col items-center justify-center h-48 gap-3">
+        <div className="flex flex-col items-center justify-center py-12 gap-3">
           <p className="text-sm text-gray-400 text-center">Taste profile is temporarily unavailable</p>
           {onRetry && (
             <button
@@ -347,7 +341,7 @@ const TasteProfileCard = ({
   }
 
   return (
-    <GlassCard className="h-80">
+    <GlassCard>
       <h3 className="text-lg font-semibold text-white mb-1">Your Taste Profile</h3>
       <p className="text-sm text-green-300 mb-3">{profile.archetype}</p>
 
@@ -384,7 +378,6 @@ const getAlbumImage = (track: RecommendationTrack, size: 'small' | 'medium' = 's
   if (track.album_image_url) return track.album_image_url;
   const imgs = track.album_images;
   if (!imgs || imgs.length === 0) return null;
-  // Spotify returns [640, 300, 64] — index 2 = small thumbnail, index 1 = medium
   if (size === 'small') return imgs[2]?.url ?? imgs[1]?.url ?? imgs[0]?.url;
   return imgs[1]?.url ?? imgs[0]?.url;
 };
@@ -569,7 +562,7 @@ const DashboardContent = ({
               <span className="text-sm text-gray-300">Tracks Analyzed</span>
             </div>
             <p className="text-2xl font-bold text-white">
-              {userProfile?.total_tracks_analyzed || 0}
+              {userProfile?.total_tracks_analyzed ?? '—'}
             </p>
             <p className="text-xs text-gray-400">From your Spotify library</p>
           </div>
@@ -590,9 +583,9 @@ const DashboardContent = ({
             </div>
             <p className="text-2xl font-bold text-white">
               {recommendations.length > 0
-                ? Math.round(recommendations[0]?.similarity_score * 100) || 'N/A'
-                : 'N/A'
-              }%
+                ? `${Math.round((recommendations[0]?.similarity_score ?? 0) * 100)}%`
+                : '—'
+              }
             </p>
             <p className="text-xs text-gray-400">AI accuracy</p>
           </div>
@@ -614,7 +607,7 @@ const DashboardContent = ({
           {recommendations.length > 0 && (
             <button
               onClick={onSavePlaylist}
-              className="bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 transition-colors flex items-center gap-2"
+              className="bg-green-500 text-white px-4 py-2 rounded-lg hover:bg-green-600 transition-colors flex items-center gap-2"
             >
               <Save className="w-4 h-4" />
               Save Playlist
@@ -632,11 +625,13 @@ const DashboardContent = ({
             ))}
           </div>
         ) : (
-          <div className="text-center py-8">
-            <p className="text-gray-400 mb-4">No recommendations yet</p>
+          <div className="text-center py-12">
+            <Sparkles className="w-10 h-10 text-gray-600 mx-auto mb-3" />
+            <p className="text-gray-400 mb-1 font-medium">No recommendations yet</p>
+            <p className="text-sm text-gray-500 mb-5">Hit generate to get a personalised playlist from your library.</p>
             <button
               onClick={onGenerateRecommendations}
-              className="bg-green-500 text-white px-6 py-2 rounded-lg hover:bg-green-600 transition-colors"
+              className="bg-gradient-to-r from-green-500 to-green-400 text-white px-6 py-2.5 rounded-xl font-medium hover:shadow-lg hover:shadow-green-500/20 transition-all"
             >
               Generate Your First Playlist
             </button>
@@ -657,7 +652,6 @@ const DashboardContent = ({
   );
 };
 
-// DISCOVER TAB COMPONENT
 const DiscoverTab = ({ token }: { token: string }) => {
   const [explorer, setExplorer] = useState<DiscoverExplorerPayload | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -745,7 +739,15 @@ const DiscoverTab = ({ token }: { token: string }) => {
             <Loader2 className="w-8 h-8 animate-spin text-green-500" />
           </div>
         ) : error || !explorer ? (
-          <div className="text-sm text-gray-400">Explorer data unavailable. Try refresh.</div>
+          <div className="flex flex-col items-center gap-3 py-8">
+            <p className="text-sm text-gray-400">Explorer data unavailable.</p>
+            <button
+              onClick={loadExplorer}
+              className="text-xs text-green-400 hover:text-green-300 border border-green-500/30 px-4 py-1.5 rounded-lg transition-colors"
+            >
+              Try Again
+            </button>
+          </div>
         ) : (
           <>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
@@ -899,7 +901,6 @@ const DiscoverTab = ({ token }: { token: string }) => {
   );
 };
 
-// ANALYTICS TAB COMPONENT
 const AnalyticsTab = ({ token, userProfile }: { token: string; userProfile: UserProfile | null }) => {
   const [timeRange, setTimeRange] = useState('medium_term');
   const [topTracks, setTopTracks] = useState<TopTrack[]>([]);
@@ -1145,7 +1146,6 @@ const AnalyticsTab = ({ token, userProfile }: { token: string; userProfile: User
   );
 };
 
-// PLAYLISTS TAB COMPONENT
 const PlaylistsTab = ({ token }: { token: string }) => {
   const [prompt, setPrompt] = useState('');
   const [playlistTitle, setPlaylistTitle] = useState('');
@@ -1367,6 +1367,8 @@ export default function DashboardLayout() {
   const [showSaveModal, setShowSaveModal] = useState(false);
   const [playlistName, setPlaylistName] = useState('');
   const [playlistDescription, setPlaylistDescription] = useState('');
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'success' | 'error'>('idle');
+  const [saveError, setSaveError] = useState('');
   const [currentMood, setCurrentMood] = useState<string | null>(null);
   const [tasteProfile, setTasteProfile] = useState<TasteProfile | null>(null);
   const [tasteProfileLoading, setTasteProfileLoading] = useState(false);
@@ -1378,21 +1380,18 @@ export default function DashboardLayout() {
     const isFresh = params.get('fresh');
 
     if (authCode) {
-      // A fresh OAuth redirect arrived — discard any stale JWT immediately so
-      // the old identity can never be used while the exchange is in flight.
       sessionStorage.removeItem('access_token');
 
-      // Exchange the one-time server code for a JWT — the JWT itself never
-      // appears in the URL, preventing it from leaking into browser history or logs.
       window.history.replaceState({}, '', '/dashboard');
 
-      fetch(`${API_BASE}/api/auth/exchange?code=${authCode}`, { method: 'POST' })
+      fetch(`${API_BASE}/api/auth/exchange`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: authCode }),
+      })
         .then((r) => r.json())
         .then((data) => {
           if (data.access_token) {
-            // Always clear React state before setting the new token so that
-            // stale profile/recommendations from a previous account cannot be
-            // displayed even briefly.
             setUserProfile(null);
             setCurrentUser(null);
             setRecommendations([]);
@@ -1410,7 +1409,6 @@ export default function DashboardLayout() {
           window.location.href = '/login';
         });
     } else {
-      // Returning visit — restore from sessionStorage
       const stored = sessionStorage.getItem('access_token');
       if (stored) {
         setToken(stored);
@@ -1445,7 +1443,6 @@ export default function DashboardLayout() {
         setRecommendations(recs);
       }
 
-      // Defer taste profile until core dashboard content is loaded.
       window.setTimeout(() => {
         void loadTasteProfile(token);
       }, 400);
@@ -1496,6 +1493,8 @@ export default function DashboardLayout() {
   const handleSavePlaylist = async () => {
     if (!token || recommendations.length === 0) return;
 
+    setSaveStatus('saving');
+    setSaveError('');
     try {
       const response = await fetch(`${API_BASE}/api/playlists/save`, {
         method: 'POST',
@@ -1513,17 +1512,22 @@ export default function DashboardLayout() {
       });
 
       if (response.ok) {
-        alert('Playlist saved successfully!');
-        setShowSaveModal(false);
-        setPlaylistName('');
-        setPlaylistDescription('');
+        setSaveStatus('success');
+        setTimeout(() => {
+          setShowSaveModal(false);
+          setPlaylistName('');
+          setPlaylistDescription('');
+          setSaveStatus('idle');
+          setSaveError('');
+        }, 1200);
       } else {
-        const error = await response.json();
-        alert(`Failed to save playlist: ${error.detail}`);
+        const err = await response.json();
+        setSaveStatus('error');
+        setSaveError(err.detail || 'Failed to save playlist');
       }
-    } catch (error) {
-      console.error('Error saving playlist:', error);
-      alert('Failed to save playlist');
+    } catch {
+      setSaveStatus('error');
+      setSaveError('Could not connect to server. Please try again.');
     }
   };
 
@@ -1532,13 +1536,20 @@ export default function DashboardLayout() {
       ? `${currentMood.charAt(0).toUpperCase() + currentMood.slice(1)} Vibes`
       : `AI Recommendations ${new Date().toLocaleDateString()}`;
     setPlaylistName(defaultName);
+    setPlaylistDescription('');
+    setSaveStatus('idle');
+    setSaveError('');
     setShowSaveModal(true);
   };
 
   if (!token) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-gray-900 via-black to-gray-900 flex items-center justify-center">
-        <Loader2 className="w-8 h-8 animate-spin text-green-500" />
+      <div className="min-h-screen bg-gradient-to-br from-gray-900 via-black to-gray-900 flex flex-col items-center justify-center gap-4">
+        <div className="w-12 h-12 bg-gradient-to-br from-green-500 to-green-600 rounded-2xl flex items-center justify-center mb-2">
+          <Music className="w-7 h-7 text-white" />
+        </div>
+        <Loader2 className="w-6 h-6 animate-spin text-green-500" />
+        <p className="text-sm text-gray-500">Loading your music profile…</p>
       </div>
     );
   }
@@ -1580,8 +1591,8 @@ export default function DashboardLayout() {
 
       {/* Save Playlist Modal */}
       {showSaveModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-gray-800 p-6 rounded-2xl max-w-md w-full mx-4">
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
+          <div className="backdrop-blur-xl bg-black/80 border border-white/20 p-6 rounded-2xl max-w-md w-full mx-4 shadow-2xl">
             <h3 className="text-lg font-semibold text-white mb-4">Save Playlist</h3>
 
             <div className="space-y-4">
@@ -1591,25 +1602,32 @@ export default function DashboardLayout() {
                   type="text"
                   value={playlistName}
                   onChange={(e) => setPlaylistName(e.target.value)}
-                  className="w-full bg-gray-700 text-white rounded-lg px-3 py-2 border border-gray-600 focus:border-green-500 focus:outline-none"
+                  className="w-full bg-white/5 text-white rounded-xl px-4 py-2.5 border border-white/20 focus:border-green-500/60 focus:outline-none focus:ring-1 focus:ring-green-500/30 placeholder:text-gray-500"
                   placeholder="Enter playlist name"
                 />
               </div>
 
               <div>
-                <label className="block text-sm text-gray-300 mb-2">Description (Optional)</label>
+                <label className="block text-sm text-gray-300 mb-2">Description <span className="text-gray-500">(optional)</span></label>
                 <textarea
                   value={playlistDescription}
                   onChange={(e) => setPlaylistDescription(e.target.value)}
-                  className="w-full bg-gray-700 text-white rounded-lg px-3 py-2 border border-gray-600 focus:border-green-500 focus:outline-none"
-                  placeholder="Enter description"
+                  className="w-full bg-white/5 text-white rounded-xl px-4 py-2.5 border border-white/20 focus:border-green-500/60 focus:outline-none focus:ring-1 focus:ring-green-500/30 placeholder:text-gray-500 resize-none"
+                  placeholder="What's the vibe?"
                   rows={3}
                 />
               </div>
 
-              <div className="text-sm text-gray-400">
-                {recommendations.length} tracks • {currentMood ? `${currentMood} mood` : 'AI recommendations'}
-              </div>
+              <p className="text-xs text-gray-500">
+                {recommendations.length} tracks · {currentMood ? `${currentMood} mood` : 'AI recommendations'}
+              </p>
+
+              {saveStatus === 'error' && (
+                <p className="text-sm text-rose-300">{saveError}</p>
+              )}
+              {saveStatus === 'success' && (
+                <p className="text-sm text-green-400">Playlist saved!</p>
+              )}
             </div>
 
             <div className="flex gap-3 mt-6">
@@ -1618,17 +1636,20 @@ export default function DashboardLayout() {
                   setShowSaveModal(false);
                   setPlaylistName('');
                   setPlaylistDescription('');
+                  setSaveStatus('idle');
+                  setSaveError('');
                 }}
-                className="flex-1 bg-gray-600 text-white py-2 rounded-lg hover:bg-gray-500 transition-colors"
+                className="flex-1 bg-white/10 hover:bg-white/20 text-white py-2.5 rounded-xl border border-white/20 transition-colors"
               >
                 Cancel
               </button>
               <button
                 onClick={handleSavePlaylist}
-                disabled={!playlistName.trim()}
-                className="flex-1 bg-green-500 text-white py-2 rounded-lg hover:bg-green-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                disabled={!playlistName.trim() || saveStatus === 'saving' || saveStatus === 'success'}
+                className="flex-1 bg-green-500 text-white py-2.5 rounded-xl hover:bg-green-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
               >
-                Save
+                {saveStatus === 'saving' && <Loader2 className="w-4 h-4 animate-spin" />}
+                {saveStatus === 'success' ? 'Saved!' : 'Save'}
               </button>
             </div>
           </div>

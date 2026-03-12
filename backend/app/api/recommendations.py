@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 from typing import List, Optional, Dict, Any, Set, Tuple
 from pydantic import BaseModel, Field
 import asyncio
@@ -18,6 +20,7 @@ from app.ml.recommender import RecommendationEngine
 router = APIRouter()
 settings = get_settings()
 logger = logging.getLogger(__name__)
+limiter = Limiter(key_func=get_remote_address)
 
 class RecommendationRequest(BaseModel):
     seed_tracks: Optional[List[str]] = None
@@ -260,7 +263,6 @@ def _pick_outside_genres(top_genres: List[str]) -> List[str]:
     picked: List[str] = []
     seen_scenes: Set[str] = set()
     ranked = bridge_scores.most_common(12)
-    # First pass: one genre per scene bucket
     for genre, _ in ranked:
         if genre.lower() in user_blob:
             continue
@@ -271,7 +273,6 @@ def _pick_outside_genres(top_genres: List[str]) -> List[str]:
         seen_scenes.add(scene)
         if len(picked) >= 6:
             break
-    # Second pass: fill remaining slots by score
     if len(picked) < 6:
         for genre, _ in ranked:
             if genre.lower() in user_blob or genre in picked:
@@ -343,7 +344,7 @@ def _diversify_track_candidates(
     enforce_pop_band_mix: bool = True,
 ) -> List[Dict[str, Any]]:
     pool = _dedupe_track_candidates(candidates)
-    random.shuffle(pool)  # freshness across refreshes
+    random.shuffle(pool)
     pool.sort(key=lambda x: float(x.get("_score", 0.0)), reverse=True)
 
     selected: List[Dict[str, Any]] = []
@@ -640,7 +641,6 @@ async def _module_artists_you_should_know(
             normalized["_source"] = "genre-search"
             candidates.append((score, normalized))
 
-        # Playlist-artist fallback source
         playlists = await _safe_spotify_search(
             sp,
             query=f"{genre} mix",
@@ -814,8 +814,9 @@ async def _require_access_token(current_user: dict) -> str:
 
 
 @router.post("/generate", response_model=RecommendationResponse)
-async def generate_recommendations(
-    request: RecommendationRequest,
+@limiter.limit("10/minute")
+async def generate_recommendations(request: Request,
+    body: RecommendationRequest,
     current_user: dict = Depends(get_current_user)
 ):
     """Generate personalized recommendations for user"""
@@ -827,9 +828,9 @@ async def generate_recommendations(
             recommendations = await recommendation_engine.generate_recommendations(
                 user_id=current_user["spotify_id"],
                 access_token=access_token,
-                seed_tracks=request.seed_tracks,
-                target_features=request.target_features,
-                limit=request.limit
+                seed_tracks=body.seed_tracks,
+                target_features=body.target_features,
+                limit=body.limit
             )
 
         if not recommendations:
@@ -850,7 +851,9 @@ async def generate_recommendations(
 
 
 @router.post("/mood-playlist", response_model=RecommendationResponse)
+@limiter.limit("10/minute")
 async def generate_mood_playlist(
+    http_request: Request,
     request: MoodPlaylistRequest,
     current_user: dict = Depends(get_current_user)
 ):
@@ -1246,7 +1249,7 @@ async def discover_artist_detail(
         top_tracks = _diversify_track_candidates(
             top_track_candidates,
             limit=8,
-            max_per_artist=8,  # single artist detail view
+            max_per_artist=8,
             max_per_album=1,
             max_per_source=8,
             enforce_pop_band_mix=False,

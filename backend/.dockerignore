@@ -1,0 +1,41 @@
+# Never copy these into the Docker image.
+
+# Python runtime artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environment — image uses pip-installed deps, not venv
+venv/
+.venv/
+env/
+
+# Secrets — must come from environment variables at runtime, never baked in
+.env
+*.env
+.env.*
+
+# Local databases — production uses PostgreSQL
+*.db
+*.sqlite3
+
+# Test suite — not needed at runtime
+tests/
+test_*.py
+pytest.ini
+.pytest_cache/
+coverage/
+.coverage
+
+# Developer tooling
+.cache/
+*.log
+.DS_Store
+.idea/
+.vscode/
+
+# Git
+.git/
+.gitignore
