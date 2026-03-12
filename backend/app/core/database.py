@@ -5,6 +5,7 @@ from app.core.config import get_settings
 import logging
 import time
 from typing import Optional
+import asyncio
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -40,11 +41,25 @@ memory_cache: dict = {}
 
 _redis_client = None
 _redis_available: Optional[bool] = None
+_redis_loop_id: Optional[int] = None
 
 
 async def _get_redis():
     """Return an async Redis client if Redis is reachable, else None."""
-    global _redis_client, _redis_available
+    global _redis_client, _redis_available, _redis_loop_id
+
+    current_loop = asyncio.get_running_loop()
+    current_loop_id = id(current_loop)
+
+    # Async Redis clients are bound to their creation loop; never reuse across loops.
+    if _redis_client is not None and _redis_loop_id is not None and _redis_loop_id != current_loop_id:
+        try:
+            await _redis_client.aclose()
+        except Exception:
+            pass
+        _redis_client = None
+        _redis_available = None
+        _redis_loop_id = None
 
     if _redis_available is True:
         return _redis_client
@@ -62,10 +77,12 @@ async def _get_redis():
         await client.ping()
         _redis_client = client
         _redis_available = True
+        _redis_loop_id = current_loop_id
         logger.info("Cache backend: Redis at %s", settings.redis_url)
         return _redis_client
     except Exception as exc:
         _redis_available = False
+        _redis_loop_id = None
         logger.warning(
             "Redis not reachable (%s) — falling back to in-memory cache. "
             "This is NOT suitable for multi-worker production deployments.",

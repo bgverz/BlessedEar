@@ -141,6 +141,8 @@ interface DiscoverExplorerPayload {
   trending_outside_your_taste: RecommendationTrack[];
 }
 
+type ErrorWithMessage = { message?: string };
+
 async function getCurrentUser(token: string) {
   const response = await fetch(`${API_BASE}/api/auth/me`, {
     headers: { 'Authorization': `Bearer ${token}` },
@@ -155,7 +157,10 @@ async function getUserProfile(token: string) {
   return response.json();
 }
 
-async function generateRecommendations(token: string, options: any = {}) {
+async function generateRecommendations(
+  token: string,
+  options: { seed_tracks?: string[]; target_features?: Record<string, number>; limit?: number } = {},
+) {
   const response = await fetch(`${API_BASE}/api/recommendations/generate`, {
     method: 'POST',
     headers: {
@@ -204,23 +209,24 @@ const GlassCard = ({ children, className = "", ...props }) => (
   </div>
 );
 
-function coerceGeneratedTracks(input: any[]): GeneratedPlaylistTrack[] {
+function coerceGeneratedTracks(input: unknown[]): GeneratedPlaylistTrack[] {
   if (!Array.isArray(input)) return [];
   return input
     .map((track) => {
       if (!track || typeof track !== 'object') return null;
-      if (typeof track.track_id !== 'string' || !track.track_id) return null;
+      const trackObj = track as Record<string, unknown>;
+      if (typeof trackObj.track_id !== 'string' || !trackObj.track_id) return null;
       return {
-        track_id: track.track_id,
-        name: typeof track.name === 'string' && track.name ? track.name : 'Unknown Track',
-        artist: typeof track.artist === 'string' && track.artist ? track.artist : 'Unknown Artist',
-        artists: Array.isArray(track.artists) ? track.artists.filter((a: any) => typeof a === 'string') : undefined,
-        album: typeof track.album === 'string' ? track.album : '',
-        album_cover_url: typeof track.album_cover_url === 'string' ? track.album_cover_url : null,
-        album_images: Array.isArray(track.album_images) ? track.album_images : [],
-        spotify_url: typeof track.spotify_url === 'string' && track.spotify_url
-          ? track.spotify_url
-          : `https://open.spotify.com/track/${track.track_id}`,
+        track_id: trackObj.track_id,
+        name: typeof trackObj.name === 'string' && trackObj.name ? trackObj.name : 'Unknown Track',
+        artist: typeof trackObj.artist === 'string' && trackObj.artist ? trackObj.artist : 'Unknown Artist',
+        artists: Array.isArray(trackObj.artists) ? trackObj.artists.filter((a): a is string => typeof a === 'string') : undefined,
+        album: typeof trackObj.album === 'string' ? trackObj.album : '',
+        album_cover_url: typeof trackObj.album_cover_url === 'string' ? trackObj.album_cover_url : null,
+        album_images: Array.isArray(trackObj.album_images) ? trackObj.album_images : [],
+        spotify_url: typeof trackObj.spotify_url === 'string' && trackObj.spotify_url
+          ? trackObj.spotify_url
+          : `https://open.spotify.com/track/${trackObj.track_id}`,
       } as GeneratedPlaylistTrack;
     })
     .filter(Boolean) as GeneratedPlaylistTrack[];
@@ -1201,8 +1207,8 @@ const PlaylistsTab = ({ token }: { token: string }) => {
       setPrompt(activePrompt);
       setPlaylistTitle(data.playlist_title || `${activePrompt} — curated by BlessedEar`);
       setTracks(coerceGeneratedTracks(data.tracks));
-    } catch (err: any) {
-      setError(err?.message || 'Playlist generation failed');
+    } catch (err: unknown) {
+      setError((err as ErrorWithMessage)?.message || 'Playlist generation failed');
       setTracks([]);
       setPlaylistTitle('');
     } finally {
@@ -1232,8 +1238,8 @@ const PlaylistsTab = ({ token }: { token: string }) => {
         throw new Error(data.detail || 'Spotify export failed');
       }
       setExportedUrl(data.spotify_url || '');
-    } catch (err: any) {
-      setError(err?.message || 'Spotify export failed');
+    } catch (err: unknown) {
+      setError((err as ErrorWithMessage)?.message || 'Spotify export failed');
     } finally {
       setIsExporting(false);
     }
@@ -1360,7 +1366,7 @@ const PlaylistsTab = ({ token }: { token: string }) => {
 export default function DashboardLayout() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
-  const [currentUser, setCurrentUser] = useState<any>(null);
+  const [currentUser, setCurrentUser] = useState<Record<string, unknown> | null>(null);
   const [recommendations, setRecommendations] = useState<RecommendationTrack[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [token, setToken] = useState<string | null>(null);

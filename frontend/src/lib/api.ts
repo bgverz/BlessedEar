@@ -12,7 +12,7 @@ export interface UserProfile {
     liveness: number;
     tempo: number;
   };
-  feature_std: any;
+  feature_std: Record<string, number>;
   top_genres: string[];
   total_tracks_analyzed: number;
   created_at: string;
@@ -24,8 +24,8 @@ export interface RecommendationTrack {
   artists: string[];
   album: string;
   preview_url?: string;
-  external_urls: any;
-  audio_features: any;
+  external_urls: Record<string, string>;
+  audio_features: Record<string, number>;
   similarity_score: number;
   recommendation_reason: string;
 }
@@ -64,7 +64,7 @@ export async function generateRecommendations(
   token: string, 
   options: {
     seed_tracks?: string[];
-    target_features?: any;
+    target_features?: Record<string, number>;
     limit?: number;
   } = {}
 ): Promise<RecommendationTrack[]> {
