@@ -7,7 +7,7 @@ from pydantic import BaseModel
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 from spotipy.cache_handler import MemoryCacheHandler
-import jwt
+from jose import JWTError, ExpiredSignatureError, jwt
 import time
 import secrets
 import logging
@@ -80,9 +80,9 @@ async def get_current_user(credentials: HTTPBearer = Depends(oauth2_scheme)):
         if spotify_id is None:
             raise credentials_exception
 
-    except jwt.ExpiredSignatureError:
+    except ExpiredSignatureError:
         raise credentials_exception
-    except jwt.InvalidTokenError:
+    except JWTError:
         raise credentials_exception
     except Exception:
         raise credentials_exception

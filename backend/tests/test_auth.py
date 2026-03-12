@@ -49,10 +49,10 @@ def _clear_cache():
 
 
 def _make_jwt(spotify_id: str) -> str:
-    import jwt as pyjwt
+    from jose import jwt as jose_jwt
     from app.core.config import get_settings
     settings = get_settings()
-    return pyjwt.encode({"sub": spotify_id}, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
+    return jose_jwt.encode({"sub": spotify_id}, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
 
 
 def _fake_sp_oauth(get_authorize_url_side_effect=None):

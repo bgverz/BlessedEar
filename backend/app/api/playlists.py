@@ -89,7 +89,7 @@ PROMPT_LANGUAGE_KEYWORDS = {
 }
 
 PROMPT_REGION_KEYWORDS = {
-    "latin": ["latin", "latino", "reggaeton", "urbano", "corridos"],
+    "latin": ["latin", "latino", "spanish", "espanol", "español", "reggaeton", "urbano", "corridos"],
 }
 
 CONCRETE_PROMPT_MARKERS = [
@@ -1017,6 +1017,12 @@ async def generate_playlist_from_prompt(
                 logger.warning("Skipping malformed track at generated index=%d", idx)
                 continue
             normalized = dict(candidate)
+            if not normalized.get("track_id"):
+                normalized_core = _normalize_generated_track(candidate)
+                if not normalized_core:
+                    logger.warning("Skipping candidate without usable id at generated index=%d", idx)
+                    continue
+                normalized = {**normalized, **normalized_core}
             tid = normalized.get("track_id")
             if not isinstance(tid, str) or not tid:
                 logger.warning("Skipping candidate without track_id at generated index=%d", idx)
