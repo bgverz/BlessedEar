@@ -44,6 +44,19 @@ _redis_available: Optional[bool] = None
 _redis_loop_id: Optional[int] = None
 
 
+async def _reset_redis_client() -> None:
+    global _redis_client, _redis_available, _redis_loop_id
+    client = _redis_client
+    _redis_client = None
+    _redis_available = None
+    _redis_loop_id = None
+    if client is not None:
+        try:
+            await client.aclose()
+        except Exception:
+            pass
+
+
 async def _get_redis():
     """Return an async Redis client if Redis is reachable, else None."""
     global _redis_client, _redis_available, _redis_loop_id
@@ -53,13 +66,7 @@ async def _get_redis():
 
     # Async Redis clients are bound to their creation loop; never reuse across loops.
     if _redis_client is not None and _redis_loop_id is not None and _redis_loop_id != current_loop_id:
-        try:
-            await _redis_client.aclose()
-        except Exception:
-            pass
-        _redis_client = None
-        _redis_available = None
-        _redis_loop_id = None
+        await _reset_redis_client()
 
     if _redis_available is True:
         return _redis_client
@@ -94,8 +101,16 @@ async def _get_redis():
 async def set_cache(key: str, value: str, expire: int = 3600):
     r = await _get_redis()
     if r is not None:
-        await r.setex(key, expire, value)
-        return
+        try:
+            await r.setex(key, expire, value)
+            return
+        except RuntimeError as exc:
+            logger.warning("Redis set_cache loop/runtime issue for key=%s: %s; reconnecting", key, exc)
+            await _reset_redis_client()
+            r = await _get_redis()
+            if r is not None:
+                await r.setex(key, expire, value)
+                return
     expires_at = time.time() + expire if expire > 0 else None
     memory_cache[key] = (value, expires_at)
 
@@ -103,7 +118,14 @@ async def set_cache(key: str, value: str, expire: int = 3600):
 async def get_cache(key: str) -> Optional[str]:
     r = await _get_redis()
     if r is not None:
-        return await r.get(key)
+        try:
+            return await r.get(key)
+        except RuntimeError as exc:
+            logger.warning("Redis get_cache loop/runtime issue for key=%s: %s; reconnecting", key, exc)
+            await _reset_redis_client()
+            r = await _get_redis()
+            if r is not None:
+                return await r.get(key)
     entry = memory_cache.get(key)
     if entry is None:
         return None
@@ -117,6 +139,14 @@ async def get_cache(key: str) -> Optional[str]:
 async def delete_cache(key: str):
     r = await _get_redis()
     if r is not None:
-        await r.delete(key)
-        return
+        try:
+            await r.delete(key)
+            return
+        except RuntimeError as exc:
+            logger.warning("Redis delete_cache loop/runtime issue for key=%s: %s; reconnecting", key, exc)
+            await _reset_redis_client()
+            r = await _get_redis()
+            if r is not None:
+                await r.delete(key)
+                return
     memory_cache.pop(key, None)
