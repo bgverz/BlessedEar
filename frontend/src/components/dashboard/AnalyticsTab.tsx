@@ -66,7 +66,7 @@ export function AnalyticsTab() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="font-display font-bold text-2xl">Sound Profile</h1>
+        <h1 className="font-display font-bold text-3xl sm:text-4xl tracking-tight">Sound Profile</h1>
         <p className="text-bone-dim text-sm mt-1">
           Built from your real genre, era, and popularity signals — not simulated audio features.
         </p>

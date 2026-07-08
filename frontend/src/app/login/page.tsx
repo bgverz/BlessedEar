@@ -15,19 +15,26 @@ const FEATURES = [
 
 export default function LoginPage() {
   const [isLoading, setIsLoading] = useState(false);
+  const [loginError, setLoginError] = useState('');
 
   const handleSpotifyLogin = async () => {
     setIsLoading(true);
+    setLoginError('');
     try {
-      const response = await fetch(`${API_BASE}/api/auth/login`);
+      // force=true always shows Spotify's account chooser/consent screen,
+      // so switching accounts doesn't silently reuse whatever session
+      // Spotify's own site still has active in the browser.
+      const response = await fetch(`${API_BASE}/api/auth/login?force=true`);
       const data = await response.json();
       if (data.auth_url) {
         window.location.href = data.auth_url;
       } else {
+        setLoginError('Could not start login. Please try again.');
         setIsLoading(false);
       }
     } catch (error) {
       console.error('Login error:', error);
+      setLoginError('Could not connect to the server. Please try again.');
       setIsLoading(false);
     }
   };
@@ -67,6 +74,10 @@ export default function LoginPage() {
               </div>
             ))}
           </div>
+
+          {loginError && (
+            <p className="text-sm text-coral text-center mb-4">{loginError}</p>
+          )}
 
           <button
             onClick={handleSpotifyLogin}

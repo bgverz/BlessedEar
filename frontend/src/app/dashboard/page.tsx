@@ -4,8 +4,10 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { AnimatePresence, motion } from 'framer-motion';
 import { AuthProvider, useAuth } from '@/lib/auth-context';
+import { PlayerProvider } from '@/lib/player-context';
 import { getCurrentUser, CurrentUser, UnauthorizedError } from '@/lib/api-client';
 import { Sidebar, DashboardTab } from '@/components/layout/Sidebar';
+import { NowPlayingBar } from '@/components/layout/NowPlayingBar';
 import { LoadingMeter } from '@/components/ui/LoadingMeter';
 import { HomeTab } from '@/components/dashboard/HomeTab';
 import { DiscoverTab } from '@/components/dashboard/DiscoverTab';
@@ -42,25 +44,28 @@ function DashboardShell() {
   }
 
   return (
-    <div className="min-h-screen bg-ink">
-      <Sidebar activeTab={activeTab} setActiveTab={setActiveTab} displayName={user?.display_name} />
-      <main className="ml-60 px-8 py-10 max-w-6xl">
-        <AnimatePresence mode="wait">
-          <motion.div
-            key={activeTab}
-            initial={{ opacity: 0, y: 6 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -6 }}
-            transition={{ duration: 0.18 }}
-          >
-            {activeTab === 'home' && <HomeTab displayName={user?.display_name} />}
-            {activeTab === 'discover' && <DiscoverTab />}
-            {activeTab === 'analytics' && <AnalyticsTab />}
-            {activeTab === 'playlists' && <PlaylistsTab />}
-          </motion.div>
-        </AnimatePresence>
-      </main>
-    </div>
+    <PlayerProvider>
+      <div className="min-h-screen bg-ink">
+        <Sidebar activeTab={activeTab} setActiveTab={setActiveTab} displayName={user?.display_name} />
+        <main className="ml-60 px-8 py-10 pb-28 max-w-6xl">
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={activeTab}
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ duration: 0.18 }}
+            >
+              {activeTab === 'home' && <HomeTab displayName={user?.display_name} />}
+              {activeTab === 'discover' && <DiscoverTab />}
+              {activeTab === 'analytics' && <AnalyticsTab />}
+              {activeTab === 'playlists' && <PlaylistsTab />}
+            </motion.div>
+          </AnimatePresence>
+        </main>
+        <NowPlayingBar />
+      </div>
+    </PlayerProvider>
   );
 }
 

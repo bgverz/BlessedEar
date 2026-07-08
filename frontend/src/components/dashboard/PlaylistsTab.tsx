@@ -85,7 +85,7 @@ export function PlaylistsTab() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="font-display font-bold text-2xl">Playlists</h1>
+        <h1 className="font-display font-bold text-3xl sm:text-4xl tracking-tight">Playlists</h1>
         <p className="text-bone-dim text-sm mt-1">Playlists you've saved from recommendations and discovery.</p>
       </div>
 

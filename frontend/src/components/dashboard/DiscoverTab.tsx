@@ -50,7 +50,7 @@ export function DiscoverTab() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="font-display font-bold text-2xl">Discover</h1>
+        <h1 className="font-display font-bold text-3xl sm:text-4xl tracking-tight">Discover</h1>
         <p className="text-bone-dim text-sm mt-1">{activeMeta.description}</p>
       </div>
 

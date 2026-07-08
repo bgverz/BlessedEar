@@ -72,7 +72,7 @@ export function HomeTab({ displayName }: { displayName?: string }) {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="font-display font-bold text-2xl">
+        <h1 className="font-display font-bold text-3xl sm:text-4xl tracking-tight">
           Welcome back{displayName ? `, ${displayName}` : ''}
         </h1>
         <p className="text-bone-dim text-sm mt-1">
@@ -81,17 +81,17 @@ export function HomeTab({ displayName }: { displayName?: string }) {
       </div>
 
       {profile && (
-        <Panel className="p-5">
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
+        <div className="relative overflow-hidden rounded-2xl p-6 bg-gradient-to-br from-amber/25 via-panel to-violet/15 border border-panel-border">
+          <div className="relative grid grid-cols-1 sm:grid-cols-3 gap-6">
             <div>
               <p className="text-xs text-bone-dim mb-1">Top genre</p>
-              <p className="font-display font-semibold capitalize">
+              <p className="font-display font-bold text-xl capitalize">
                 {profile.genre_breakdown[0]?.genre || 'Still listening…'}
               </p>
             </div>
             <div>
               <p className="text-xs text-bone-dim mb-1">Taste</p>
-              <p className="font-display font-semibold">{profile.popularity_profile.taste_label}</p>
+              <p className="font-display font-bold text-xl">{profile.popularity_profile.taste_label}</p>
             </div>
             <div>
               <Meter
@@ -103,7 +103,7 @@ export function HomeTab({ displayName }: { displayName?: string }) {
               />
             </div>
           </div>
-        </Panel>
+        </div>
       )}
 
       <div className="flex flex-wrap items-center gap-3">
