@@ -1,11 +1,7 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import uvicorn
-from typing import List, Optional
-import asyncio
 from contextlib import asynccontextmanager
-from app.models import User, Playlist
 
 from app.api import auth, recommendations, analytics, playlists
 from app.core.config import get_settings
@@ -20,7 +16,6 @@ async def lifespan(app: FastAPI):
     app.state.recommendation_engine = RecommendationEngine()
     await app.state.recommendation_engine.load_models()
     yield
-    pass
 
 app = FastAPI(
     title="BlessedEar API",
@@ -29,13 +24,18 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+cors_kwargs = {
+    "allow_origins": [settings.frontend_url],
+    "allow_credentials": True,
+    "allow_methods": ["*"],
+    "allow_headers": ["*"],
+}
+if settings.debug:
+    # Next.js picks the next free port in dev (3000, 3001, ...) — allow any
+    # localhost/127.0.0.1 port rather than hardcoding one.
+    cors_kwargs["allow_origin_regex"] = r"http://(localhost|127\.0\.0\.1):\d+"
+
+app.add_middleware(CORSMiddleware, **cors_kwargs)
 
 app.include_router(auth.router, prefix="/api/auth", tags=["authentication"])
 app.include_router(recommendations.router, prefix="/api/recommendations", tags=["recommendations"])

@@ -8,75 +8,70 @@ module.exports = {
   theme: {
     extend: {
       colors: {
-        spotify: {
-          green: '#1DB954',
-          black: '#121212',
-          dark: '#181818',
-          gray: '#282828',
-          light: '#B3B3B3',
+        // "Channel strip" palette — warm analog-console tones instead of
+        // neutral gray-900 + Spotify green.
+        ink: {
+          DEFAULT: '#15131A',
+          light: '#1B1822',
         },
-        glass: {
-          light: 'rgba(255, 255, 255, 0.1)',
-          medium: 'rgba(255, 255, 255, 0.2)',
-          dark: 'rgba(0, 0, 0, 0.1)',
-        }
+        panel: {
+          DEFAULT: '#211E29',
+          light: '#2C2836',
+          border: '#38333F',
+        },
+        bone: {
+          DEFAULT: '#F2EDE4',
+          dim: '#B8B2C4',
+        },
+        amber: {
+          DEFAULT: '#E8A33D',
+          dim: '#B87F2E',
+        },
+        coral: {
+          DEFAULT: '#E85C4A',
+          dim: '#B4483A',
+        },
+        violet: {
+          DEFAULT: '#8B7FD9',
+          dim: '#6C61AD',
+        },
       },
-      backdropBlur: {
-        xs: '2px',
+      fontFamily: {
+        display: ['var(--font-display)', 'system-ui', 'sans-serif'],
+        body: ['var(--font-body)', 'system-ui', 'sans-serif'],
+        mono: ['var(--font-mono)', 'ui-monospace', 'monospace'],
       },
       animation: {
-        'float': 'float 6s ease-in-out infinite',
-        'pulse-slow': 'pulse 4s ease-in-out infinite',
-        'shimmer': 'shimmer 2s linear infinite',
-        'slide-up': 'slideUp 0.5s ease-out',
-        'slide-down': 'slideDown 0.5s ease-out',
-        'fade-in': 'fadeIn 0.6s ease-out',
-        'scale-in': 'scaleIn 0.3s ease-out',
+        'meter-rise': 'meterRise 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards',
+        'fade-in': 'fadeIn 0.5s ease-out forwards',
+        'slide-up': 'slideUp 0.45s cubic-bezier(0.16, 1, 0.3, 1) forwards',
+        'scale-in': 'scaleIn 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards',
       },
       keyframes: {
-        float: {
-          '0%, 100%': { transform: 'translateY(0px)' },
-          '50%': { transform: 'translateY(-20px)' },
-        },
-        shimmer: {
-          '0%': { transform: 'translateX(-100%)' },
-          '100%': { transform: 'translateX(100%)' },
-        },
-        slideUp: {
-          '0%': { transform: 'translateY(20px)', opacity: '0' },
-          '100%': { transform: 'translateY(0)', opacity: '1' },
-        },
-        slideDown: {
-          '0%': { transform: 'translateY(-20px)', opacity: '0' },
-          '100%': { transform: 'translateY(0)', opacity: '1' },
+        meterRise: {
+          '0%': { transform: 'scaleY(0)' },
+          '100%': { transform: 'scaleY(1)' },
         },
         fadeIn: {
           '0%': { opacity: '0' },
           '100%': { opacity: '1' },
         },
+        slideUp: {
+          '0%': { transform: 'translateY(14px)', opacity: '0' },
+          '100%': { transform: 'translateY(0)', opacity: '1' },
+        },
         scaleIn: {
-          '0%': { transform: 'scale(0.95)', opacity: '0' },
+          '0%': { transform: 'scale(0.96)', opacity: '0' },
           '100%': { transform: 'scale(1)', opacity: '1' },
         },
       },
-      fontFamily: {
-        'display': ['Inter', 'system-ui', 'sans-serif'],
-        'body': ['Inter', 'system-ui', 'sans-serif'],
-      },
       boxShadow: {
-        'glass': '0 8px 32px 0 rgba(31, 38, 135, 0.37)',
-        'glow': '0 0 20px rgba(29, 185, 84, 0.3)',
-        'soft': '0 2px 15px 0 rgba(0, 0, 0, 0.1)',
+        panel: '0 1px 0 0 rgba(242, 237, 228, 0.04) inset, 0 8px 24px -8px rgba(0, 0, 0, 0.5)',
+        glow: '0 0 24px -4px rgba(232, 163, 61, 0.35)',
       },
       borderRadius: {
-        'xl': '1rem',
-        '2xl': '1.5rem',
-        '3xl': '2rem',
-      },
-      backgroundImage: {
-        'gradient-radial': 'radial-gradient(var(--tw-gradient-stops))',
-        'gradient-conic': 'conic-gradient(from 180deg at 50% 50%, var(--tw-gradient-stops))',
-        'glass-gradient': 'linear-gradient(135deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.05))',
+        xl: '0.875rem',
+        '2xl': '1.25rem',
       },
     },
   },

@@ -1,85 +1,70 @@
 # BlessedEar
 
-An intelligent music recommendation platform that discovers new tracks based on your Spotify listening history, built with FastAPI, React, and machine learning algorithms.
+A music recommendation platform built on top of your own Spotify listening
+history — genre and era breakdowns, mainstream-vs-niche taste analysis, and
+recommendations generated from the artists, albums, and genres you already
+play. Built with FastAPI and Next.js.
 
 ## Features
 
-- **Smart Music Discovery**: AI-powered recommendations that filter out your existing library to suggest genuinely new music
-- **Multi-Source Analysis**: Analyzes your top tracks, saved songs, and personal playlists for comprehensive taste profiling
-- **Account Switching**: Seamless authentication flow supporting multiple Spotify accounts
-- **Real-Time Analytics**: Interactive dashboard with audio feature visualizations and listening pattern insights
-- **Mood-Based Playlists**: Generate curated playlists based on different moods (happy, chill, energetic, etc.)
-- **Modern UI**: Glassmorphism design with smooth animations and responsive layout
+- **Music discovery**: recommendations built from artist/album co-occurrence
+  in your library, scored by real listening frequency — not simulated scores
+- **Genre discovery**: surfaces tracks from genres outside your current
+  rotation via Spotify search
+- **Mood playlists**: keyword-matches your library against a mood, with a
+  transparent match-strength score
+- **Sound Profile analytics**: genre breakdown, era distribution, popularity
+  (mainstream vs. niche), library growth over time, and a taste-shift
+  indicator — all computed from real Spotify data (tracks, artists, genres,
+  timestamps), since Spotify deprecated the audio-features/recommendations
+  endpoints for new apps in late 2024
+- **Playlist management**: save generated playlists, browse them, export any
+  saved playlist back to Spotify as a real playlist
+- **Spotify OAuth**: session persisted via JWT + localStorage, with automatic
+  Spotify token refresh and real server-side logout (clears stored tokens)
 
 ## Tech Stack
 
-**Backend:**
-- FastAPI (Python) - High-performance async API framework
-- Spotipy - Spotify Web API integration
-- SQLAlchemy - Database ORM with PostgreSQL support
-- JWT Authentication - Secure session management
-- Pydantic - Data validation and settings management
+**Backend:** FastAPI, SQLAlchemy (SQLite by default, Postgres-ready), Spotipy,
+PyJWT, Pydantic Settings
 
-**Frontend:**
-- Next.js 14 - React framework with TypeScript
-- Tailwind CSS - Utility-first styling
-- Framer Motion - Smooth animations
-- Lucide React - Modern icon library
-
-**Machine Learning:**
-- Custom recommendation engine with multiple fallback strategies
-- Audio feature analysis and similarity scoring
-- Collaborative filtering based on user listening patterns
+**Frontend:** Next.js 14 (App Router) + TypeScript, Tailwind CSS,
+Framer Motion, Recharts, react-hot-toast
 
 ## Project Structure
 
 ```
 BlessedEar/
 ├── backend/
-│   ├── app/
-│   │   ├── api/           
-│   │   │   ├── auth.py    
-│   │   │   ├── recommendations.py
-│   │   │   └── playlists.py
-│   │   ├── core/          
-│   │   │   ├── config.py
-│   │   │   └── database.py
-│   │   ├── ml/            
-│   │   │   ├── recommender.py
-│   │   │   └── audio_analyzer.py
-│   │   └── models/        
-│   │       ├── user.py
-│   │       └── playlist.py
+│   └── app/
+│       ├── api/            # auth.py, recommendations.py, analytics.py, playlists.py
+│       ├── core/           # config.py, database.py
+│       ├── ml/             # recommender.py, analytics_engine.py
+│       └── models/         # user.py, playlist.py
 ├── frontend/
-│   ├── src/
-│   │   ├── app/           
-│   │   │   ├── dashboard/
-│   │   │   └── login/
-│   │   └── components/   
-│   │       ├── auth/
-│   │       ├── dashboard/
-│   │       └── ui/
-└── README.md
+│   └── src/
+│       ├── app/            # /, /login, /dashboard
+│       ├── components/     # layout/, dashboard/, ui/
+│       └── lib/            # api-client.ts, auth-context.tsx
+└── docker-compose.yml
 ```
 
-## Setup Instructions
+## Setup
 
 ### Prerequisites
 
 - Python 3.11+
 - Node.js 18+
-- Spotify Developer Account
-- PostgreSQL (optional, defaults to SQLite)
+- A Spotify Developer app
 
-### 1. Spotify API Setup
+### 1. Spotify app setup
 
-1. Go to the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
-2. Create a new app
-3. Note your **Client ID** and **Client Secret**
-4. Add `http://127.0.0.1:8000/api/auth/callback` to Redirect URIs
-5. Add user emails to "Users and Access" for development
+1. Create an app at the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
+2. Note the **Client ID** and **Client Secret**
+3. Add `http://127.0.0.1:8000/api/auth/callback` to Redirect URIs
+4. Add your account under "Users and Access" (required for apps in development mode)
 
-### 2. Backend Setup
+### 2. Backend
 
 ```bash
 cd backend
@@ -88,125 +73,84 @@ source venv/bin/activate  # windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-Create `.env` file:
+Create `backend/.env`:
 ```env
 SPOTIFY_CLIENT_ID=your_client_id_here
 SPOTIFY_CLIENT_SECRET=your_client_secret_here
 SPOTIFY_REDIRECT_URI=http://127.0.0.1:8000/api/auth/callback
-JWT_SECRET_KEY=your-super-secret-jwt-key
+FRONTEND_URL=http://localhost:3000
+JWT_SECRET_KEY=a-long-random-secret
 DATABASE_URL=sqlite:///./blessedear.db
+DEBUG=true
 ```
 
-Start the backend:
+Run it:
 ```bash
-python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-### 3. Frontend Setup
+### 3. Frontend
 
 ```bash
 cd frontend
 npm install
+```
+
+Create `frontend/.env.local`:
+```env
+NEXT_PUBLIC_API_URL=http://localhost:8000
+```
+
+```bash
 npm run dev
 ```
 
-The application will be available at `http://localhost:3000`
+The app runs at `http://localhost:3000`.
 
-## API Endpoints
-
-### Authentication
-- `GET /api/auth/login` - Initiate Spotify OAuth flow
-- `GET /api/auth/callback` - Handle OAuth callback
-- `POST /api/auth/logout` - Clear user session
-- `GET /api/auth/me` - Get current user info
-
-### Recommendations
-- `POST /api/recommendations/generate` - Generate personalized recommendations
-- `POST /api/recommendations/mood-playlist` - Create mood-based playlist
-- `GET /api/recommendations/profile` - Get user's music profile
-- `GET /api/recommendations/top-tracks` - Get user's top tracks
-
-### Playlists
-- `POST /api/playlists/create` - Create Spotify playlist
-- `GET /api/playlists/my-playlists` - Get user's playlists
-
-## How It Works
-
-1. **Authentication**: Users authenticate via Spotify OAuth 2.0
-2. **Data Collection**: System analyzes user's top tracks, saved songs, and playlist contents
-3. **Recommendation Engine**: 
-   - Uses related artists and top tracks when Spotify's recommendation API is unavailable
-   - Implements search-based discovery for genre exploration
-   - Filters out existing user tracks to ensure only new music is recommended
-4. **Smart Filtering**: Prevents recommending songs already in user's library
-5. **Multiple Strategies**: Fallback systems ensure recommendations even when primary APIs fail
-
-## Key Features
-
-### Music Discovery Algorithm
-- **Related Artist Analysis**: Discovers new music through artists similar to user preferences
-- **Genre Exploration**: Uses intelligent search to find tracks in preferred genres
-- **Duplicate Prevention**: Sophisticated filtering ensures only new tracks are recommended
-- **Mood Matching**: Audio feature analysis for mood-specific playlist generation
-
-### User Experience
-- **Real-Time Dashboard**: Live updating analytics and recommendations
-- **Account Management**: Switch between multiple Spotify accounts seamlessly
-- **Responsive Design**: Works across desktop, tablet, and mobile devices
-- **Performance Optimized**: Fast loading with efficient data caching
-
-## Troubleshooting
-
-### Common Issues
-
-**"Authentication failed" error:**
-- Verify Spotify app credentials in `.env` file
-- Check that redirect URI matches exactly in Spotify dashboard
-- Ensure user email is added to app's whitelist
-
-**No recommendations generated:**
-- Check backend logs for API errors
-- Verify user has sufficient music history (songs, playlists)
-- Ensure Spotify app has proper scopes enabled
-
-**Frontend connection issues:**
-- Confirm backend is running on port 8000
-- Check CORS settings if accessing from different domain
-
-## Development
-
-### Adding New Features
-
-1. **Backend**: Add new endpoints in `app/api/` directory
-2. **Frontend**: Create components in `src/components/`
-3. **ML**: Extend recommendation logic in `app/ml/recommender.py`
-
-### Testing
+### Docker (optional)
 
 ```bash
-# Backend tests
-cd backend
-python -m pytest
-
-# Frontend tests  
-cd frontend
-npm test
+JWT_SECRET_KEY=... SPOTIFY_CLIENT_ID=... SPOTIFY_CLIENT_SECRET=... docker compose up --build
 ```
 
-## Contributing
+Runs Postgres, the backend, and the frontend together. See `docker-compose.yml`
+for the full environment variable list.
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+## API
+
+**Auth** — `GET /api/auth/login`, `GET /api/auth/callback`, `GET /api/auth/me`,
+`POST /api/auth/logout`, `POST /api/auth/refresh`
+
+**Recommendations** — `POST /api/recommendations/generate`,
+`POST /api/recommendations/mood-playlist`, `GET /api/recommendations/profile`,
+`GET /api/recommendations/top-tracks`, `GET /api/recommendations/discover/{type}`
+(`similar` | `new-genres` | `trending` | `deep-cuts`), `GET /api/recommendations/genres`
+
+**Analytics** — `GET /api/analytics/listening-profile`
+
+**Playlists** — `POST /api/playlists/save`, `GET /api/playlists/my-playlists`,
+`GET /api/playlists/{id}`, `DELETE /api/playlists/{id}`,
+`POST /api/playlists/{id}/export-to-spotify`
+
+Debug endpoints under `/api/recommendations/debug/*` only respond when
+`DEBUG=true`.
+
+## How it works
+
+Spotify deprecated its audio-features and seed-based recommendations
+endpoints for apps without extended quota access in late 2024, so this app
+avoids them entirely:
+
+- **Recommendations** come from artist/album co-occurrence in your top
+  tracks, saved tracks, playlists, and recently played — deep cuts from
+  artists and albums you already play, scored by how often they show up in
+  your library.
+- **Genre discovery** uses Spotify's search endpoint (`genre:"x"` queries),
+  picking genres your listening data doesn't already cover.
+- **Analytics** aggregates real artist `genres` tags, track/artist
+  `popularity`, album `release_date`, and save/listen timestamps — no
+  simulated or random data anywhere in the pipeline.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-- Spotify Web API for music data access
-- Next.js and FastAPI
-- Open source libraries
+MIT

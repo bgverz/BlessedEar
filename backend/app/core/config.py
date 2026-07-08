@@ -7,21 +7,22 @@ class Settings(BaseSettings):
     debug: bool = True
     
     database_url: str = "sqlite:///./blessedear.db"
-    redis_url: str = "redis://localhost:6379"
-    
+
     spotify_client_id: str
     spotify_client_secret: str
     spotify_redirect_uri: str = "http://127.0.0.1:8000/api/auth/callback"
-    
+    frontend_url: str = "http://localhost:3000"
+
     jwt_secret_key: str = "your-super-secret-jwt-key-change-in-production"
     jwt_algorithm: str = "HS256"
-    access_token_expire_minutes: int = 30
+    access_token_expire_minutes: int = 1440
     
     model_cache_ttl: int = 3600
     recommendation_batch_size: int = 50
-    
+
     class Config:
         env_file = ".env"
+        protected_namespaces = ('settings_',)
 
 @lru_cache()
 def get_settings():

@@ -4,12 +4,12 @@ from fastapi.security import HTTPBearer
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 import jwt
+import time
 from datetime import datetime, timedelta
 from typing import Optional
-import json
 
 from app.core.config import get_settings
-from app.core.database import get_db, set_cache, get_cache, delete_cache
+from app.core.database import get_db
 from app.models.user import User, UserCreate
 from sqlalchemy.orm import Session
 
@@ -40,50 +40,71 @@ def create_access_token(data: dict):
             detail=f"Token creation failed: {str(e)}"
         )
 
-async def get_current_user(credentials: HTTPBearer = Depends(oauth2_scheme)):
+def user_to_dict(user: User) -> dict:
+    return {
+        "id": user.id,
+        "spotify_id": user.spotify_id,
+        "email": user.email,
+        "display_name": user.display_name,
+        "spotify_tokens": user.spotify_tokens,
+    }
+
+def refresh_user_spotify_tokens(db: Session, user: User) -> dict:
+    """Refresh the user's Spotify access token using their refresh token and persist it"""
+    tokens = user.spotify_tokens or {}
+    refresh_token = tokens.get("refresh_token")
+    if not refresh_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No refresh token available, please re-authenticate",
+        )
+
+    sp_oauth = get_spotify_oauth()
+    new_tokens = sp_oauth.refresh_access_token(refresh_token)
+    # Spotify sometimes omits refresh_token on renewal; keep the old one if so
+    new_tokens.setdefault("refresh_token", refresh_token)
+
+    user.spotify_tokens = new_tokens
+    db.commit()
+    return new_tokens
+
+async def get_current_user(
+    credentials: HTTPBearer = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
+):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    
+
     try:
         token = credentials.credentials
         payload = jwt.decode(
-            token, 
-            settings.jwt_secret_key, 
+            token,
+            settings.jwt_secret_key,
             algorithms=[settings.jwt_algorithm]
         )
         spotify_id: str = payload.get("sub")
         if spotify_id is None:
             raise credentials_exception
-            
-        print(f"JWT DECODED SPOTIFY_ID: {spotify_id}")
-        
-    except jwt.InvalidTokenError as e:
-        print(f"JWT DECODE ERROR: {e}")
+    except (jwt.InvalidTokenError, jwt.ExpiredSignatureError):
         raise credentials_exception
-    except jwt.ExpiredSignatureError as e:
-        print(f"JWT EXPIRED ERROR: {e}")
+
+    user = db.query(User).filter(User.spotify_id == spotify_id).first()
+    if user is None or not user.spotify_tokens:
         raise credentials_exception
-    except Exception as e:
-        print(f"JWT GENERAL ERROR: {e}")
-        raise credentials_exception
-    
-    user_data = await get_cache(f"user:{spotify_id}")
-    print(f"CACHE DATA FOR {spotify_id}: {user_data}")
-    
-    if user_data is None:
-        print(f"NO CACHE DATA FOUND FOR USER: {spotify_id}")
-        raise credentials_exception
-    
-    try:
-        parsed_data = json.loads(user_data)
-        print(f"RETURNING USER DATA: {parsed_data.get('display_name')} ({parsed_data.get('spotify_id')})")
-        return parsed_data
-    except json.JSONDecodeError as e:
-        print(f"JSON DECODE ERROR: {e}")
-        raise credentials_exception
+
+    tokens = user.spotify_tokens
+    expires_at = tokens.get("expires_at")
+    if expires_at is not None and time.time() >= expires_at - 60:
+        try:
+            refresh_user_spotify_tokens(db, user)
+        except Exception as e:
+            print(f"Spotify token refresh failed for {spotify_id}: {e}")
+            raise credentials_exception
+
+    return user_to_dict(user)
 
 @router.get("/login")
 async def login(force: bool = Query(False, description="Force fresh authentication")):
@@ -103,15 +124,10 @@ async def callback(code: str, db: Session = Depends(get_db)):
     try:
         sp_oauth = get_spotify_oauth()
         token_info = sp_oauth.get_access_token(code)
-        
+
         sp = spotipy.Spotify(auth=token_info['access_token'])
         spotify_user = sp.current_user()
-        
-        print(f"SPOTIFY USER FROM API: {spotify_user['id']} - {spotify_user.get('display_name', 'No Name')}")
-        print(f"SPOTIFY EMAIL: {spotify_user.get('email', 'No Email')}")
-        
-        await delete_cache(f"user:{spotify_user['id']}")
-        
+
         user = db.query(User).filter(User.spotify_id == spotify_user['id']).first()
         if not user:
             user_data = UserCreate(
@@ -122,33 +138,21 @@ async def callback(code: str, db: Session = Depends(get_db)):
             )
             user = User(**user_data.dict())
             db.add(user)
-            print(f"CREATED NEW USER: {user.spotify_id}")
         else:
+            user.email = spotify_user.get('email')
+            user.display_name = spotify_user.get('display_name')
             user.spotify_tokens = token_info
             user.last_login = datetime.utcnow()
-            print(f"UPDATED EXISTING USER: {user.spotify_id}")
-        
+
         db.commit()
-        
+
         access_token = create_access_token(data={"sub": user.spotify_id})
-        print(f"ACCESS TOKEN BEING CREATED FOR: {user.spotify_id}")
-        
-        user_cache_data = {
-            "id": user.id,
-            "spotify_id": user.spotify_id,
-            "display_name": user.display_name,
-            "spotify_tokens": token_info
-        }
-        
-        await set_cache(f"user:{user.spotify_id}", json.dumps(user_cache_data))
-        
-        print(f"Successfully authenticated user: {user.display_name} ({user.spotify_id})")
-        
+
         return RedirectResponse(
-            url=f"http://localhost:3000/dashboard?token={access_token}&fresh=true",
+            url=f"{settings.frontend_url}/dashboard?token={access_token}&fresh=true",
             status_code=302
         )
-        
+
     except Exception as e:
         print(f"Authentication error: {str(e)}")
         raise HTTPException(
@@ -162,48 +166,33 @@ async def get_current_user_info(current_user: dict = Depends(get_current_user)):
     return current_user
 
 @router.post("/logout")
-async def logout(current_user: dict = Depends(get_current_user)):
-    """Clear user session and force fresh authentication"""
-    try:
-        spotify_id = current_user['spotify_id']
-        print(f"Logging out user: {current_user.get('display_name')} ({spotify_id})")
-        
-        await delete_cache(f"user:{spotify_id}")
-        
-        await delete_cache(f"recommendations:{spotify_id}")
-        await delete_cache(f"profile:{spotify_id}")
-        
-        return {"message": "Logged out successfully", "spotify_id": spotify_id}
-        
-    except Exception as e:
-        print(f"Logout error: {str(e)}")
-        return {"message": "Logged out successfully"}
+async def logout(
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Clear the user's stored Spotify tokens, requiring re-authentication on next login"""
+    user = db.query(User).filter(User.spotify_id == current_user['spotify_id']).first()
+    if user:
+        user.spotify_tokens = None
+        db.commit()
+
+    return {"message": "Logged out successfully", "spotify_id": current_user['spotify_id']}
 
 @router.post("/refresh")
-async def refresh_spotify_token(current_user: dict = Depends(get_current_user)):
-    """Refresh Spotify access token"""
+async def refresh_spotify_token(
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Manually refresh the Spotify access token (also happens automatically when it's near expiry)"""
+    user = db.query(User).filter(User.spotify_id == current_user['spotify_id']).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+
     try:
-        sp_oauth = get_spotify_oauth()
-        tokens = current_user.get("spotify_tokens")
-        
-        if not tokens or not tokens.get("refresh_token"):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="No refresh token available"
-            )
-        
-        new_tokens = sp_oauth.refresh_access_token(tokens["refresh_token"])
-        
-        current_user["spotify_tokens"] = new_tokens
-        await set_cache(
-            f"user:{current_user['spotify_id']}", 
-            json.dumps(current_user)
-        )
-        
-        return {"message": "Token refreshed successfully"}
-        
+        refresh_user_spotify_tokens(db, user)
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Token refresh failed: {str(e)}"
-        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Token refresh failed: {str(e)}")
+
+    return {"message": "Token refreshed successfully"}

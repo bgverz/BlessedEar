@@ -18,8 +18,6 @@ else:
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-memory_cache = {}
-
 def get_db():
     db = SessionLocal()
     try:
@@ -31,18 +29,3 @@ async def init_db():
     """Create database tables"""
     Base.metadata.create_all(bind=engine)
     print("Database initialized!")
-
-async def set_cache(key: str, value: str, expire: int = 3600):
-    memory_cache[key] = value
-
-async def get_cache(key: str):
-    return memory_cache.get(key)
-
-async def delete_cache(key: str):
-    """Delete a key from cache"""
-    try:
-        print(f"Deleting cache key: {key}")
-        pass
-    except Exception as e:
-        print(f"Cache deletion failed for {key}: {e}")
-        pass

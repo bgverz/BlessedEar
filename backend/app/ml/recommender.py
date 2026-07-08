@@ -1,9 +1,24 @@
 import spotipy
-import pandas as pd
 import random
 from typing import List, Dict, Any
-from datetime import datetime
 from collections import defaultdict
+
+from app.ml.analytics_engine import AnalyticsEngine
+
+# Spotify's genre seeds, used as a curated pool for genre-discovery search
+AVAILABLE_GENRES = [
+    'acoustic', 'afrobeat', 'alt-rock', 'alternative', 'ambient',
+    'blues', 'bossanova', 'brazil', 'breakbeat', 'british',
+    'chill', 'classical', 'club', 'country', 'dance',
+    'electronic', 'folk', 'funk', 'garage', 'gospel',
+    'hip-hop', 'house', 'indie', 'jazz', 'latin',
+    'pop', 'punk', 'reggae', 'rock', 'soul'
+]
+
+def score_from_strength(strength: float, floor: float = 0.55, spread: float = 0.4) -> float:
+    """Turn a real 0-1 signal (e.g. normalized artist frequency) into a similarity score"""
+    strength = max(0.0, min(1.0, strength))
+    return round(floor + spread * strength, 2)
 
 class RecommendationEngine:
     def __init__(self):
@@ -18,24 +33,6 @@ class RecommendationEngine:
         """Get authenticated Spotify client"""
         return spotipy.Spotify(auth=access_token)
 
-    
-    async def extract_audio_features(self, sp: spotipy.Spotify, track_ids: List[str]) -> pd.DataFrame:
-        """Extract audio features for tracks - simplified fallback"""
-        data = []
-        for track_id in track_ids:
-            data.append({
-                'id': track_id,
-                'danceability': round(random.uniform(0.3, 0.8), 3),
-                'energy': round(random.uniform(0.4, 0.9), 3),
-                'valence': round(random.uniform(0.2, 0.7), 3),
-                'speechiness': round(random.uniform(0.05, 0.3), 3),
-                'acousticness': round(random.uniform(0.1, 0.6), 3),
-                'instrumentalness': round(random.uniform(0.0, 0.4), 3),
-                'liveness': round(random.uniform(0.1, 0.3), 3),
-                'tempo': round(random.uniform(90, 160), 1)
-            })
-        return pd.DataFrame(data)
-    
     async def get_user_top_tracks(self, sp: spotipy.Spotify, time_range: str = "medium_term", limit: int = 50):
         """Get user's top tracks"""
         try:
@@ -172,43 +169,14 @@ class RecommendationEngine:
             print(f"Error in get_user_all_tracks: {e}")
             return await self.get_user_top_tracks(sp, "medium_term", 50)
     
-    async def build_user_profile(self, user_id: str, access_token: str):
-        """Build user profile from listening history"""
-        try:
-            sp = await self.get_spotify_client(access_token)
-            all_tracks = await self.get_user_all_tracks(sp, limit=500)
-            
-            if not all_tracks:
-                return {"error": "No tracks found for user profile"}
-            
-            avg_features = {
-                'danceability': round(random.uniform(0.5, 0.8), 3),
-                'energy': round(random.uniform(0.6, 0.9), 3),
-                'valence': round(random.uniform(0.4, 0.7), 3),
-                'speechiness': round(random.uniform(0.05, 0.15), 3),
-                'acousticness': round(random.uniform(0.2, 0.5), 3),
-                'instrumentalness': round(random.uniform(0.05, 0.3), 3),
-                'liveness': round(random.uniform(0.1, 0.25), 3),
-                'tempo': round(random.uniform(110, 140), 1)
-            }
-            
-            return {
-                'user_id': user_id,
-                'avg_features': avg_features,
-                'total_tracks_analyzed': len(all_tracks),
-                'created_at': datetime.utcnow().isoformat()
-            }
-            
-        except Exception as e:
-            print(f"Error building user profile: {e}")
-            return {"error": str(e)}
     
-    async def get_artist_similar_tracks(self, sp: spotipy.Spotify, artist_id: str, limit: int = 10):
-        """Get other tracks by the same artist"""
+    async def get_artist_similar_tracks(self, sp: spotipy.Spotify, artist_id: str, limit: int = 10, strength: float = 0.75):
+        """Get other tracks by the same artist. `strength` (0-1) should reflect how strongly
+        this artist features in the user's listening (e.g. normalized play frequency)."""
         try:
             albums = sp.artist_albums(artist_id, album_type='album,single', limit=10)
             similar_tracks = []
-            
+
             for album in albums['items']:
                 try:
                     tracks = sp.album_tracks(album['id'], limit=10)
@@ -221,7 +189,7 @@ class RecommendationEngine:
                             'album_images': track.get('album', {}).get('images', []),
                             'preview_url': track.get('preview_url'),
                             'external_urls': track.get('external_urls', {}),
-                            'similarity_score': round(random.uniform(0.85, 0.95), 2),
+                            'similarity_score': score_from_strength(strength, floor=0.6, spread=0.35),
                             'recommendation_reason': f"More from {track['artists'][0]['name']}"
                         })
                         
@@ -241,12 +209,13 @@ class RecommendationEngine:
             print(f"Error getting artist similar tracks: {e}")
             return []
     
-    async def get_album_deep_cuts(self, sp: spotipy.Spotify, album_id: str, exclude_track_ids: set, limit: int = 5):
-        """Get other tracks from the same album"""
+    async def get_album_deep_cuts(self, sp: spotipy.Spotify, album_id: str, exclude_track_ids: set, limit: int = 5, strength: float = 0.6):
+        """Get other tracks from the same album. `strength` (0-1) should reflect how strongly
+        this album features in the user's listening (e.g. normalized play frequency)."""
         try:
             tracks = sp.album_tracks(album_id, limit=50)
             deep_cuts = []
-            
+
             for track in tracks['items']:
                 if track['id'] not in exclude_track_ids:
                     album_info = sp.album(album_id)
@@ -258,7 +227,7 @@ class RecommendationEngine:
                         'album_images': track.get('album', {}).get('images', []),
                         'preview_url': track.get('preview_url'),
                         'external_urls': track.get('external_urls', {}),
-                        'similarity_score': round(random.uniform(0.80, 0.90), 2),
+                        'similarity_score': score_from_strength(strength, floor=0.5, spread=0.35),
                         'recommendation_reason': f"From {album_info['name']}"
                     })
                     
@@ -271,12 +240,13 @@ class RecommendationEngine:
             print(f"Error getting album deep cuts: {e}")
             return []
     
-    async def get_artist_top_tracks_discovery(self, sp: spotipy.Spotify, artist_id: str, exclude_track_ids: set, limit: int = 3):
-        """Get top tracks from an artist (excluding already known tracks)"""
+    async def get_artist_top_tracks_discovery(self, sp: spotipy.Spotify, artist_id: str, exclude_track_ids: set, limit: int = 3, strength: float = 0.65):
+        """Get top tracks from an artist (excluding already known tracks). `strength` (0-1) should
+        reflect how strongly this artist features in the user's listening."""
         try:
             top_tracks = sp.artist_top_tracks(artist_id)
             discoveries = []
-            
+
             for track in top_tracks['tracks']:
                 if track['id'] not in exclude_track_ids:
                     discoveries.append({
@@ -286,7 +256,7 @@ class RecommendationEngine:
                         'album': track['album']['name'],
                         'preview_url': track.get('preview_url'),
                         'external_urls': track.get('external_urls', {}),
-                        'similarity_score': round(random.uniform(0.80, 0.92), 2),
+                        'similarity_score': score_from_strength(strength, floor=0.55, spread=0.3),
                         'recommendation_reason': f"Popular track by {track['artists'][0]['name']}"
                     })
                     
@@ -326,51 +296,57 @@ class RecommendationEngine:
             
             favorite_artists = sorted(artist_frequency.items(), key=lambda x: x[1], reverse=True)
             favorite_albums = sorted(album_frequency.items(), key=lambda x: x[1], reverse=True)
-            
+
+            max_artist_freq = favorite_artists[0][1] if favorite_artists else 1
+            max_album_freq = favorite_albums[0][1] if favorite_albums else 1
+
             print(f"Found {len(favorite_artists)} favorite artists")
-            
+
             print("Getting deep cuts from favorite artists...")
             for artist_id, frequency in favorite_artists[:15]:
                 if len(enhanced_recs) >= limit:
                     break
-                    
-                artist_tracks = await self.get_artist_similar_tracks(sp, artist_id, 8)
-                
+
+                strength = frequency / max_artist_freq
+                artist_tracks = await self.get_artist_similar_tracks(sp, artist_id, 8, strength=strength)
+
                 new_tracks = [t for t in artist_tracks if t['id'] not in user_track_ids]
-                
+
                 selected_tracks = new_tracks[:3] if frequency > 3 else new_tracks[:2]
                 enhanced_recs.extend(selected_tracks)
-                
+
                 for track in selected_tracks:
                     user_track_ids.add(track['id'])
-            
+
             print(f"Found {len(enhanced_recs)} tracks from artist deep dives")
-            
+
             if len(enhanced_recs) < limit:
                 print("Getting deep cuts from favorite albums...")
                 for album_id, frequency in favorite_albums[:10]:
                     if len(enhanced_recs) >= limit:
                         break
-                        
-                    album_tracks = await self.get_album_deep_cuts(sp, album_id, user_track_ids, 3)
-                    
+
+                    strength = frequency / max_album_freq
+                    album_tracks = await self.get_album_deep_cuts(sp, album_id, user_track_ids, 3, strength=strength)
+
                     for track in album_tracks:
                         if len(enhanced_recs) >= limit:
                             break
                         if track['id'] not in user_track_ids:
                             enhanced_recs.append(track)
                             user_track_ids.add(track['id'])
-            
+
             print(f"Found {len(enhanced_recs)} total tracks after album deep cuts")
-            
+
             if len(enhanced_recs) < limit:
                 print("Getting popular tracks from known artists...")
                 for artist_id, frequency in favorite_artists[:20]:
                     if len(enhanced_recs) >= limit:
                         break
-                        
-                    popular_tracks = await self.get_artist_top_tracks_discovery(sp, artist_id, user_track_ids, 2)
-                    
+
+                    strength = frequency / max_artist_freq
+                    popular_tracks = await self.get_artist_top_tracks_discovery(sp, artist_id, user_track_ids, 2, strength=strength)
+
                     for track in popular_tracks:
                         if len(enhanced_recs) >= limit:
                             break
@@ -467,14 +443,24 @@ class RecommendationEngine:
                     mood_tracks.append((track, score))
             
             mood_tracks.sort(key=lambda x: x[1], reverse=True)
-            
+            max_keyword_score = len(keywords) or 1
+
             if mood_tracks:
                 selected_tracks = [track for track, score in mood_tracks[:limit]]
+                keyword_scores = {track['id']: score for track, score in mood_tracks[:limit]}
             else:
                 selected_tracks = random.sample(all_user_tracks, min(limit, len(all_user_tracks)))
-            
+                keyword_scores = {}
+
             enhanced_recs = []
             for track in selected_tracks:
+                keyword_score = keyword_scores.get(track['id'])
+                if keyword_score:
+                    similarity_score = score_from_strength(keyword_score / max_keyword_score, floor=0.6, spread=0.35)
+                    reason = f'Perfect for {mood} mood'
+                else:
+                    similarity_score = 0.5
+                    reason = 'From your library'
                 enhanced_recs.append({
                     'id': track['id'],
                     'name': track['name'],
@@ -482,22 +468,22 @@ class RecommendationEngine:
                     'album': track['album']['name'],
                     'preview_url': track.get('preview_url'),
                     'external_urls': track.get('external_urls', {}),
-                    'similarity_score': round(random.uniform(0.85, 0.95), 2),
-                    'recommendation_reason': f'Perfect for {mood} mood'
+                    'similarity_score': similarity_score,
+                    'recommendation_reason': reason
                 })
-            
+
             if len(enhanced_recs) < limit:
                 user_track_ids = {track['id'] for track in selected_tracks}
                 remaining_needed = limit - len(enhanced_recs)
-                
-                for track in selected_tracks[:5]: 
+
+                for track in selected_tracks[:5]:
                     if len(enhanced_recs) >= limit:
                         break
-                        
+
                     for artist in track.get('artists', []):
                         artist_id = artist.get('id')
                         if artist_id:
-                            additional_tracks = await self.get_artist_similar_tracks(sp, artist_id, 3)
+                            additional_tracks = await self.get_artist_similar_tracks(sp, artist_id, 3, strength=0.5)
                             
                             for add_track in additional_tracks:
                                 if len(enhanced_recs) >= limit:
@@ -510,62 +496,72 @@ class RecommendationEngine:
             random.shuffle(enhanced_recs)
             print(f"Generated {len(enhanced_recs)} tracks for {mood} mood")
             return enhanced_recs[:limit]
-            
+
         except Exception as e:
             print(f"Error generating mood playlist: {e}")
             return []
-    # Add these strategies to your recommender.py:
 
-async def get_related_artists_recommendations(self, sp: spotipy.Spotify, artist_id: str, user_track_ids: set, limit: int = 5):
-    """Get recommendations from artists related to the given artist"""
-    try:
-        related = sp.artist_related_artists(artist_id)
-        recommendations = []
-        
-        for related_artist in related['artists'][:5]:  # Check first 5 related artists
-            # Get their top tracks
-            top_tracks = sp.artist_top_tracks(related_artist['id'])
-            for track in top_tracks['tracks'][:3]:  # Take 3 tracks per artist
-                if track['id'] not in user_track_ids:
-                    recommendations.append({
+    async def get_genre_discovery_tracks(self, sp: spotipy.Spotify, exclude_genres: set, user_track_ids: set, limit: int = 12):
+        """Surface tracks from genres the user doesn't already listen to, via Spotify search
+        (the old seed-genre recommendations endpoint is deprecated, but search still works)"""
+        candidate_genres = [g for g in AVAILABLE_GENRES if g not in exclude_genres]
+        random.shuffle(candidate_genres)
+
+        discoveries = []
+        for genre in candidate_genres:
+            if len(discoveries) >= limit:
+                break
+            try:
+                results = sp.search(q=f'genre:"{genre}"', type='track', limit=10, market='US')
+                tracks = results.get('tracks', {}).get('items', [])
+                tracks.sort(key=lambda t: t.get('popularity', 0), reverse=True)
+
+                added_for_genre = 0
+                for track in tracks:
+                    if added_for_genre >= 2 or len(discoveries) >= limit:
+                        break
+                    if track['id'] in user_track_ids:
+                        continue
+
+                    discoveries.append({
                         'id': track['id'],
                         'name': track['name'],
                         'artists': [artist['name'] for artist in track['artists']],
                         'album': track['album']['name'],
-                        'similarity_score': round(random.uniform(0.75, 0.90), 2),
-                        'recommendation_reason': f"Similar artist to your favorites"
+                        'album_images': track.get('album', {}).get('images', []),
+                        'preview_url': track.get('preview_url'),
+                        'external_urls': track.get('external_urls', {}),
+                        'similarity_score': round(min(track.get('popularity', 50) / 100, 0.95), 2),
+                        'recommendation_reason': f"New genre for you: {genre}"
                     })
-                    
-                    if len(recommendations) >= limit:
-                        return recommendations
-        
-        return recommendations
-    except Exception as e:
-        print(f"Error getting related artists: {e}")
-        return []
+                    user_track_ids.add(track['id'])
+                    added_for_genre += 1
 
-async def get_genre_recommendations(self, sp: spotipy.Spotify, genres: list, user_track_ids: set, limit: int = 10):
-    """Get recommendations using Spotify's recommendation API with genres"""
-    try:
-        # Use Spotify's built-in recommendation engine
-        recs = sp.recommendations(seed_genres=genres[:5], limit=limit*2, market='US')
-        
-        recommendations = []
-        for track in recs['tracks']:
-            if track['id'] not in user_track_ids:
-                recommendations.append({
-                    'id': track['id'],
-                    'name': track['name'],
-                    'artists': [artist['name'] for artist in track['artists']],
-                    'album': track['album']['name'],
-                    'similarity_score': round(random.uniform(0.70, 0.85), 2),
-                    'recommendation_reason': f"Genre discovery: {', '.join(genres[:2])}"
-                })
-                
-                if len(recommendations) >= limit:
-                    break
-        
-        return recommendations
-    except Exception as e:
-        print(f"Error with genre recommendations: {e}")
-        return []
+            except Exception as e:
+                print(f"Error searching genre {genre}: {e}")
+                continue
+
+        return discoveries[:limit]
+
+    async def generate_genre_discovery(self, user_id: str, access_token: str, limit: int = 12):
+        """Generate a playlist of tracks from genres outside the user's current listening"""
+        try:
+            sp = await self.get_spotify_client(access_token)
+            all_user_tracks = await self.get_user_all_tracks(sp, limit=150)
+
+            if not all_user_tracks:
+                return []
+
+            user_track_ids = {t['id'] for t in all_user_tracks if t.get('id')}
+
+            analytics = AnalyticsEngine()
+            artist_ids = analytics._artist_ids_from_tracks(all_user_tracks)
+            artists_by_id = analytics._fetch_artists(sp, artist_ids)
+            genre_breakdown = analytics._genre_breakdown(all_user_tracks, artists_by_id)
+            known_genres = {g['genre'] for g in genre_breakdown}
+
+            return await self.get_genre_discovery_tracks(sp, known_genres, user_track_ids, limit)
+
+        except Exception as e:
+            print(f"Error generating genre discovery: {e}")
+            return []
